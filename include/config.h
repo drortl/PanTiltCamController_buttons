@@ -82,20 +82,61 @@
 
 #define PELCO_HOME_PRESET 1     // preset number the pan-tilt head calls on "HOME"
 
-// Pelco-D has no "move by N degrees" command - only "move until stopped",
-// with no position feedback. Each button press is turned into a fixed
-// PELCO_STEP_DEG move by sending a move command at full speed (63) for a
-// computed duration, then stopping: duration = PELCO_STEP_DEG / rated speed.
+// Pelco-D has no "move by N degrees" command - only "move until stopped".
+// The head does answer a non-standard position-query extension (see
+// queryPositionDeg() in Pelco.h), used to correct drift after each move,
+// but there's still no "move to N degrees" command - each button press is
+// turned into a fixed PELCO_STEP_DEG move by sending a move command at the
+// current jog speed (adjustable via the web UI, see jogSpeed in main.cpp)
+// for a computed duration, then stopping: duration scales with jog speed
+// since the head's angular rate is assumed proportional to the speed byte.
 // PELCO_MAX_PAN/TILT_SPEED_DEG_S are the unit's rated max speed (14 deg/s
 // pan, 2 deg/s tilt at speed byte 63, per its manual) - re-measure against
 // a known angle and adjust if the actual step size drifts from 5 degrees.
 #define PELCO_STEP_DEG             5.0f
-#define PELCO_STEP_SPEED           63     // max Pelco-D speed byte (0-63) - used for step moves
+#define PELCO_STEP_SPEED           63     // default jog speed (0-63), adjustable via web UI
 #define PELCO_MAX_PAN_SPEED_DEG_S  14.0f
 #define PELCO_MAX_TILT_SPEED_DEG_S 2.0f
-#define PAN_STEP_MS  ((uint32_t)(1000.0f * PELCO_STEP_DEG / PELCO_MAX_PAN_SPEED_DEG_S))
-#define TILT_STEP_MS ((uint32_t)(1000.0f * PELCO_STEP_DEG / PELCO_MAX_TILT_SPEED_DEG_S))
 
-// "Go to Azimut" auto-drive: how close counts as "arrived" - half a step,
-// since we can't land more precisely than one PELCO_STEP_DEG pulse anyway.
-#define AZIMUTH_ARRIVE_TOLERANCE_DEG (PELCO_STEP_DEG / 2.0f)
+// Closed-loop drives (Go to Azimut, Pan Mid, Tilt Zero - see updateGoTo()):
+// full PELCO_STEP_DEG pulses at jogSpeed would only ever land within half a
+// step (2.5 deg) of the target, since there's no smaller final-correction
+// pulse - so once within AUTO_SLOWDOWN_THRESHOLD_DEG of the target, pulses
+// shrink to AUTO_CREEP_STEP_DEG (clamped to whatever distance remains) at
+// the slower AUTO_CREEP_SPEED, letting the final approach land within
+// AUTO_ARRIVE_TOLERANCE_DEG instead. 0.1 deg is close to the floor of what's
+// achievable - at that point pulse durations are tens of ms and the head's
+// own motor start/stop lag (not commanded distance) dominates; MIN_PULSE_MS
+// in stepMsFor() keeps those pulses from rounding down to ~0 and doing
+// nothing, but if it doesn't converge in practice, raise this back up.
+#define AUTO_ARRIVE_TOLERANCE_DEG   0.1f
+#define AUTO_SLOWDOWN_THRESHOLD_DEG 3.0f
+#define AUTO_CREEP_STEP_DEG         1.0f
+#define AUTO_CREEP_SPEED            10     // slow speed byte (0-63) for the final approach
+
+// ---------- Auto Calibration (pan/tilt travel limits) ----------
+// Drives each axis to its mechanical end and detects arrival by the head's
+// real reported position going flat/stalled, then repeats for the opposite
+// end and the other axis - same approach as the sibling PanTiltRS485Controller
+// USB app's Auto Calibrate (see MainForm.cs there). Limits are stored as raw
+// head-reported degrees and persisted to flash.
+#define CAL_SPEED               63     // full speed for the calibration scan
+#define CAL_STALL_WINDOW_MS     900    // must be flat for this long to count as arrived
+#define CAL_STALL_EPSILON_DEG   0.6f
+#define CAL_PHASE_TIMEOUT_MS    100000 // safety backstop per phase (tilt is slow)
+
+// Fixed calibration-target buttons in the web UI: drive straight to a known
+// raw motor position (same frame queryPositionDeg() reads in) rather than
+// scanning to a mechanical limit. Measured on this unit - pan center is
+// 175 deg, tilt level/horizontal (zero) is 29 deg - re-measure and adjust
+// if re-mounted.
+#define PAN_MID_TARGET_DEG      175.0f
+#define TILT_ZERO_TARGET_DEG    29.0f
+#define GOTO_DRIVE_TIMEOUT_MS   60000  // safety backstop (tilt is slow over a large range)
+
+// ---------- User position presets ----------
+// Preset 1 (PELCO_HOME_PRESET) is reserved for Home. Presets 2-4 are
+// exposed in the web UI as three user-assignable "save current position /
+// go to it" slots (uses the head's own preset memory via setPreset/callPreset).
+#define PELCO_USER_PRESET_COUNT 3
+#define PELCO_USER_PRESET_BASE  2

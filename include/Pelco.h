@@ -10,6 +10,7 @@
 // cmd2 bits (shared by both): 0x02=pan right, 0x04=pan left, 0x08=tilt up, 0x10=tilt down
 // "Set preset" command:  cmd1=0x00, cmd2=0x03, data1=0x00, data2=preset number
 // "Call preset" command: cmd1=0x00, cmd2=0x07, data1=0x00, data2=preset number
+// "Query position" (non-standard, see queryPositionDeg() below): cmd2=0x51 (pan) / 0x53 (tilt)
 //
 // NOTE: per this pan-tilt unit's manual, preset numbers 17-125 are reserved
 // for built-in functions (limit scan, cruise tracks, guard position, self-
@@ -80,6 +81,34 @@ public:
 
     void setPreset(uint8_t address, uint8_t presetNum) {
         sendFrame(address, 0x00, 0x03, 0x00, presetNum);
+    }
+
+    // Non-standard "query position" extension (cmd2 0x51 = pan, 0x53 =
+    // tilt) - NOT part of the official Pelco-D spec, so most generic/
+    // off-brand units won't answer it at all. Confirmed against this same
+    // unit via the sibling PanTiltRS485Controller (USB-RS485 dongle) app:
+    // it replies with a 7-byte Pelco-D frame whose cmd2 is 0x59 (report
+    // pan) / 0x5B (report tilt), data1/data2 the position as a big-endian
+    // 16-bit value in 0.01 degree units. Blocks up to timeoutMs waiting for
+    // the reply; returns false on timeout or a malformed/unexpected frame.
+    bool queryPositionDeg(uint8_t address, bool pan, float &degrees, uint32_t timeoutMs = 250) {
+        uint8_t cmd2 = pan ? 0x51 : 0x53;
+        sendFrame(address, 0x00, cmd2, 0x00, 0x00);
+
+        uint8_t reply[7];
+        uint8_t n = 0;
+        unsigned long deadline = millis() + timeoutMs;
+        while (n < sizeof(reply) && (long)(millis() - deadline) < 0) {
+            if (port->available()) reply[n++] = port->read();
+        }
+        if (n != sizeof(reply) || reply[0] != 0xFF) return false;
+
+        uint8_t addr = reply[1], cmd1 = reply[2], rcmd2 = reply[3], data1 = reply[4], data2 = reply[5], checksum = reply[6];
+        if (((addr + cmd1 + rcmd2 + data1 + data2) & 0xFF) != checksum) return false;
+        if (rcmd2 != (pan ? 0x59 : 0x5B)) return false;
+
+        degrees = ((data1 << 8) | data2) / 100.0f;
+        return true;
     }
 
 private:

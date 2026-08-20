@@ -29,6 +29,28 @@ const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
   #goAzimuthBtn { background:#2d6cdf; }
   #goAzimuthBtn.driving { background:#c0392b; }
   #goAzimuthBtn.arrived { background:#2b9e4f; }
+  .panel { background:#222; border-radius:10px; padding:14px; margin-top:20px; display:inline-block; min-width:260px; text-align:left; }
+  .panel h3 { margin:0 0 10px; font-size:14px; color:#9ab; text-align:center; }
+  .speedRow { display:flex; align-items:center; gap:10px; }
+  .speedRow input[type=range] { flex:1; }
+  .speedRow span { min-width:28px; text-align:right; }
+  .presetRow { display:flex; align-items:center; gap:8px; margin-top:8px; }
+  .presetRow > span { flex:1; }
+  .presetInfo { display:block; font-size:11px; color:#9ab; }
+  .presetRow button { font-size:14px; padding:8px 12px; }
+  .presetRow button.save { background:#6b2fa0; }
+  .calRow { display:flex; gap:8px; justify-content:center; margin-top:4px; flex-wrap:wrap; }
+  .calRow button { font-size:14px; padding:10px 14px; }
+  #autoCalBtn { background:#6b2fa0; }
+  #cancelCalBtn { background:#c0392b; display:none; }
+  .gotoBtn.driving { background:#c0392b; }
+  .gotoBtn.arrived { background:#2b9e4f; }
+  #calMsg { text-align:center; font-size:13px; color:#9ab; margin-top:8px; min-height:16px; }
+  .limitAxis { margin-top:10px; }
+  .limitAxis .lbl { font-size:13px; color:#9ab; margin-bottom:4px; }
+  .limitAxis .row { display:flex; gap:6px; align-items:center; }
+  .limitAxis .row span { flex:1; font-size:13px; }
+  .limitAxis .row button { font-size:12px; padding:6px 10px; }
 </style>
 </head>
 <body>
@@ -36,7 +58,8 @@ const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
 <div class="status">
   <div>Azimut: <span id="heading">--</span> deg<span id="noHome"></span></div>
   <div>Pan: <span id="pan">--</span> deg</div>
-  <div>Tilt: <span id="tilt">--</span> deg</div>
+  <div>Motor Pan: <span id="rawPan">--</span> deg</div>
+  <div>Tilt: <span id="tiltRel">--</span> deg (0 = horizontal)</div>
 </div>
 <div class="pad">
   <button class="b1" data-axis="tilt" data-dir="1">&#9650;</button>
@@ -48,6 +71,48 @@ const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
 <div class="presets">
   <input type="number" id="targetAzimuth" min="0" max="359" value="0">
   <button id="goAzimuthBtn">Go to Azimut</button>
+</div>
+
+<div class="panel">
+  <h3>JOG SPEED</h3>
+  <div class="speedRow">
+    <input type="range" id="speedSlider" min="1" max="63" value="63">
+    <span id="speedVal">63</span>
+  </div>
+</div>
+
+<div class="panel">
+  <h3>POSITION PRESETS</h3>
+  <div id="presetRows"></div>
+</div>
+
+<div class="panel">
+  <h3>AUTO CALIBRATE</h3>
+  <div class="calRow">
+    <button id="autoCalBtn">Auto Calibrate</button>
+    <button id="cancelCalBtn">Cancel</button>
+  </div>
+  <div id="calMsg">Not calibrated</div>
+  <div class="calRow">
+    <button class="gotoBtn" id="goToPanMidBtn">Pan Mid (175&deg;)</button>
+    <button class="gotoBtn" id="goToTiltZeroBtn">Tilt Zero (29&deg;)</button>
+  </div>
+  <div class="limitAxis">
+    <div class="lbl">Pan limits: <span id="panLimits">min -- / max --</span></div>
+    <div class="row">
+      <span></span>
+      <button data-lim-axis="pan" data-which="min">Set Min</button>
+      <button data-lim-axis="pan" data-which="max">Set Max</button>
+    </div>
+  </div>
+  <div class="limitAxis">
+    <div class="lbl">Tilt limits: <span id="tiltLimits">min -- / max --</span></div>
+    <div class="row">
+      <span></span>
+      <button data-lim-axis="tilt" data-which="min">Set Min</button>
+      <button data-lim-axis="tilt" data-which="max">Set Max</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -92,16 +157,139 @@ goAzimuthBtn.addEventListener('click', () => {
   fetch(`/goAzimuth?target=${t}`).catch(()=>{});
 });
 
+// Jog speed (Pelco speed byte 0-63, sent with every move/step command -
+// see jogSpeed in main.cpp). Only pushed on 'change' (release/blur), not
+// every 'input' tick, to avoid flooding the RS485-adjacent web server with
+// requests while dragging.
+const speedSlider = document.getElementById('speedSlider');
+const speedVal = document.getElementById('speedVal');
+speedSlider.addEventListener('input', () => { speedVal.textContent = speedSlider.value; });
+speedSlider.addEventListener('change', () => {
+  fetch(`/setSpeed?value=${speedSlider.value}`).catch(()=>{});
+});
+
+// Three user position presets (preset numbers 2-4; preset 1 is HOME - see
+// PELCO_USER_PRESET_BASE/COUNT in config.h). Save asks for confirmation
+// since it overwrites whatever was there before, matching Save Home.
+const PRESET_COUNT = 3, PRESET_BASE = 2;
+const presetRows = document.getElementById('presetRows');
+for (let i = 0; i < PRESET_COUNT; i++) {
+  const num = PRESET_BASE + i;
+  const row = document.createElement('div');
+  row.className = 'presetRow';
+  row.innerHTML = `<span>Preset ${i + 1} <span class="presetInfo" id="presetInfo${i}">(--)</span></span>` +
+    `<button class="save" data-num="${num}">Save</button>` +
+    `<button class="go" data-num="${num}">Go</button>`;
+  presetRows.appendChild(row);
+}
+presetRows.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-num]');
+  if (!btn) return;
+  const num = btn.dataset.num;
+  if (btn.classList.contains('save')) {
+    if (confirm(`Save the current position as Preset ${num - PRESET_BASE + 1}?`)) {
+      fetch(`/presetSet?num=${num}`).catch(()=>{});
+    }
+  } else {
+    fetch(`/presetGo?num=${num}`).catch(()=>{});
+  }
+});
+
+// Auto Calibrate: drives pan then tilt to each mechanical limit (detected
+// by stall) and records the travel range - see updateAutoCalibrate() in
+// main.cpp. Status/limits are read back via /status while it runs.
+const autoCalBtn = document.getElementById('autoCalBtn');
+const cancelCalBtn = document.getElementById('cancelCalBtn');
+const calMsgEl = document.getElementById('calMsg');
+autoCalBtn.addEventListener('click', () => {
+  if (confirm('Auto Calibrate will drive pan and tilt to their mechanical limits. Continue?')) {
+    fetch('/autoCalibrate').catch(()=>{});
+  }
+});
+cancelCalBtn.addEventListener('click', () => fetch('/cancelCalibrate').catch(()=>{}));
+
+// Fixed calibration-target buttons: drive straight to a known raw motor
+// position (see PAN_MID_TARGET_DEG/TILT_ZERO_TARGET_DEG in config.h). Red
+// while driving, green once /status reports arrival (goToPan/goToTilt).
+let goToPanDriving = false, goToTiltDriving = false;
+const goToPanMidBtn = document.getElementById('goToPanMidBtn');
+const goToTiltZeroBtn = document.getElementById('goToTiltZeroBtn');
+goToPanMidBtn.addEventListener('click', () => {
+  goToPanMidBtn.classList.remove('arrived');
+  goToPanMidBtn.classList.add('driving');
+  goToPanDriving = true;
+  fetch('/goToPanMid').catch(()=>{});
+});
+goToTiltZeroBtn.addEventListener('click', () => {
+  goToTiltZeroBtn.classList.remove('arrived');
+  goToTiltZeroBtn.classList.add('driving');
+  goToTiltDriving = true;
+  fetch('/goToTiltZero').catch(()=>{});
+});
+
+// Manual limit capture: jog to a mechanical limit with the direction pad,
+// then click Set Min/Max here - an alternative to Auto Calibrate.
+document.querySelectorAll('button[data-lim-axis]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    fetch(`/calLimit?axis=${btn.dataset.limAxis}&which=${btn.dataset.which}`).catch(()=>{});
+  });
+});
+
+function fmtLimits(minOk, min, maxOk, max) {
+  return `min ${minOk ? min.toFixed(1) : '--'} / max ${maxOk ? max.toFixed(1) : '--'}`;
+}
+
+// Tilt is shown relative to TILT_ZERO_TARGET_DEG (horizontal) - explicit
+// sign so + (forward/up) vs - (backward/down) from level is unambiguous.
+function fmtSigned(v) {
+  return (v >= 0 ? '+' : '') + v.toFixed(1);
+}
+
+function fmtPreset(p) {
+  const az = p && p.azOk ? p.az.toFixed(1) + '°' : '--';
+  const tilt = p && p.tiltOk ? fmtSigned(p.tilt) + '°' : '--';
+  return `(Az ${az}, Tilt ${tilt})`;
+}
+
 function poll() {
   fetch('/status').then(r => r.json()).then(s => {
     document.getElementById('heading').textContent = s.heading.toFixed(1);
     document.getElementById('noHome').textContent = s.homeSet ? '' : ' (no home saved)';
     document.getElementById('pan').textContent = s.posKnown ? s.pan.toFixed(1) : '?? (no home saved)';
-    document.getElementById('tilt').textContent = s.posKnown ? s.tilt.toFixed(1) : '??';
+    document.getElementById('rawPan').textContent = s.rawPanOk ? s.rawPan.toFixed(1) : '??';
+    document.getElementById('tiltRel').textContent = s.tiltRelOk ? fmtSigned(s.tiltRel) : '??';
     if (azDriving && !s.autoDrive) {
       azDriving = false;
       goAzimuthBtn.classList.remove('driving');
       goAzimuthBtn.classList.add('arrived');
+    }
+    if (goToPanDriving && !s.goToPan) {
+      goToPanDriving = false;
+      goToPanMidBtn.classList.remove('driving');
+      goToPanMidBtn.classList.add('arrived');
+    }
+    if (goToTiltDriving && !s.goToTilt) {
+      goToTiltDriving = false;
+      goToTiltZeroBtn.classList.remove('driving');
+      goToTiltZeroBtn.classList.add('arrived');
+    }
+
+    if (document.activeElement !== speedSlider) {
+      speedSlider.value = s.speed;
+      speedVal.textContent = s.speed;
+    }
+
+    calMsgEl.textContent = s.calMsg;
+    autoCalBtn.style.display = s.calActive ? 'none' : '';
+    cancelCalBtn.style.display = s.calActive ? '' : 'none';
+    document.getElementById('panLimits').textContent = fmtLimits(s.panMinOk, s.panMin, s.panMaxOk, s.panMax);
+    document.getElementById('tiltLimits').textContent = fmtLimits(s.tiltMinOk, s.tiltMin, s.tiltMaxOk, s.tiltMax);
+
+    if (s.presets) {
+      s.presets.forEach((p, i) => {
+        const el = document.getElementById(`presetInfo${i}`);
+        if (el) el.textContent = fmtPreset(p);
+      });
     }
   }).catch(()=>{});
 }
