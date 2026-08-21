@@ -13,12 +13,15 @@
 //
 // Signal                   GPIO   Notes
 // ----------------------------------------------------------------------------
-// TFT CS                   5      ST7735, 128x160
-// TFT DC                   17
+// TFT CS                   5      ST7796S, 480x320, 4-wire SPI (module: MSP4021)
+// TFT DC/RS                17
 // TFT RST                  16
-// TFT SCL  (hw SPI, fixed) 12     module's SPI clock pin; ESP32-S3 default SPI pin
-// TFT SDA  (hw SPI, fixed) 11     module's SPI data pin; ESP32-S3 default SPI pin
-// TFT BLK                  6      backlight, driven HIGH = on
+// TFT SCK                  12     shared SPI bus (display + touch), explicit (not core default)
+// TFT SDI/MOSI             11     shared SPI bus (display + touch)
+// TFT SDO/MISO             18     shared SPI bus - only actually driven by touch reads
+// TFT LED (backlight)      6      driven HIGH = on
+// Touch T_CS               7      XPT2046, same SPI bus as TFT, own chip select
+// Touch T_IRQ              8      low when touch panel is pressed
 // Compass SDA               21    QMC5883P, I2C addr 0x2C
 // Compass SCL               14
 // RS485 RX  (module RO)      4    UART2, Pelco-D - to the pan-tilt unit
@@ -44,15 +47,50 @@
 #define AP_SSID         "PanTiltCam-Setup"
 #define AP_PASSWORD     "12345678"   // min 8 chars, required by WiFi.softAP
 
-// ---------- TFT (ST7735, 128x160, hardware SPI) ----------
+// ---------- TFT (ST7796S, 480x320, 4-wire SPI) + XPT2046 touch ----------
+// Display and touch chip share one physical SPI bus (SCK/MOSI/MISO) with
+// separate chip-selects - see TouchUI.h. MISO is only actually driven by
+// the touch chip (the display is write-only), but is wired through anyway
+// since it's the same 4 header pins on the module either way.
+// Explicit pins throughout (not the ESP32-S3 hw-SPI defaults) because the
+// default MISO (GPIO13) is already RS485_TX_PIN on this board.
 #define TFT_CS_PIN      5
 #define TFT_DC_PIN      17
 #define TFT_RST_PIN     16
+#define TFT_SCK_PIN     12
+#define TFT_MOSI_PIN    11
+#define TFT_MISO_PIN    18
 #define TFT_BLK_PIN     6
-// SCL=12, SDA=11 (the module's labels for SPI clock/data - not I2C) are the
-// ESP32-S3 default hardware SPI pins, used automatically by the library
-// since no explicit SPI pins are passed.
-// If colors look wrong/inverted, switch INITR_BLACKTAB to INITR_GREENTAB in main.cpp.
+#define TOUCH_CS_PIN    7
+#define TOUCH_IRQ_PIN   8
+
+// Raw XPT2046 ADC range (0-4095) mapped to screen pixels - resistive touch
+// panels vary unit to unit, these are typical defaults for this module.
+// If touch feels off (dead zones at the edges, or reversed axes), watch the
+// "touch raw=.." line TouchUI.h prints to Serial on each press and adjust
+// these to match what you actually see at the screen corners; swap the min/
+// max of an axis if it reads backwards.
+#define TOUCH_RAW_MINX  300
+#define TOUCH_RAW_MAXX  3800
+#define TOUCH_RAW_MINY  300
+#define TOUCH_RAW_MAXY  3800
+// The touch chip's raw X/Y are wired to the resistive film's physical axes,
+// not to the display's setRotation() - if touches consistently land with X
+// and Y transposed (e.g. dragging left-right on screen moves the touch
+// point up-down), set this to 1 instead of adjusting MINX/MAXX/MINY/MAXY.
+#define TOUCH_SWAP_XY   0
+
+// This project's original 1.8" TFT needed 4MHz for signal integrity on
+// breadboard jumper wires - starting this new, much larger panel at the
+// same proven-safe speed rather than guessing higher. Note this only
+// controls draw calls made AFTER tft.init() (see TouchUI::begin()) - the
+// display's one-time init command sequence always runs at the Adafruit
+// ST7735/ST7789 library's own hardcoded 32MHz, which this can't override;
+// if the screen stays blank/white, that fixed-speed init sequence failing
+// on the wiring is the most likely cause. Raise this once wiring is
+// confirmed solid (a full-screen redraw at 4MHz is ~0.6s, visibly slow for
+// a touch UI).
+#define TFT_SPI_SPEED_HZ 4000000
 
 // ---------- Digital compass (QMC5883P, I2C) ----------
 #define COMPASS_SDA_PIN 21
@@ -140,3 +178,15 @@
 // go to it" slots (uses the head's own preset memory via setPreset/callPreset).
 #define PELCO_USER_PRESET_COUNT 3
 #define PELCO_USER_PRESET_BASE  2
+
+// ---------- Shared state enums ----------
+// Defined here (rather than in main.cpp) so both main.cpp and TouchUI.h can
+// declare `extern` globals of these types without one having to include the
+// other.
+enum CalPhase { CAL_IDLE, CAL_PAN_MIN, CAL_PAN_MAX, CAL_TILT_MIN, CAL_TILT_MAX };
+enum GoAxis { GO_NONE, GO_PAN, GO_TILT };
+enum GoSource { GO_SRC_NONE, GO_SRC_AZIMUTH, GO_SRC_PAN_MID, GO_SRC_TILT_ZERO };
+// Result codes for doGoAzimuth(), since it has two distinct failure modes
+// the caller needs to tell apart (the web UI maps them to different HTTP
+// statuses; the touch UI just ignores the distinction and no-ops).
+enum GoAzimuthResult { GOAZ_OK, GOAZ_NO_HOME, GOAZ_NO_REPLY };

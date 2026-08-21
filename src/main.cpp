@@ -1,20 +1,25 @@
 // Pan/Tilt camera controller — ESP32
 // Pan/tilt motion is handled by an external self-contained RS485 pan-tilt
 // head (own internal motor + MCU, Pelco-D/Pelco-P auto-adapting) - this
-// board does not drive any local motors. The web UI's direction buttons
-// step it by a fixed PELCO_STEP_DEG per press over Pelco-D/RS485 (see
-// handleStep() and PelcoController in Pelco.h).
-// 1.8" TFT (ST7735 128x160) status display + digital compass (QMC5883P)
+// board does not drive any local motors. Both the web UI and the on-device
+// touch UI drive it the same way: direction presses step by a fixed
+// PELCO_STEP_DEG per press over Pelco-D/RS485 (see doStep() and
+// PelcoController in Pelco.h).
+// 4" TFT (ST7796S 480x320, XPT2046 resistive touch) local UI + digital
+// compass (QMC5883P) - see TouchUI.h for the touch screen itself.
 //
 // Pins used (full table + reserved-GPIO notes in config.h):
 //   Signal            GPIO   Notes
 //   -----------------------------------------------------
-//   TFT CS            5      ST7735, 128x160
+//   TFT CS            5      ST7796S, 480x320
 //   TFT DC            17
 //   TFT RST           16
-//   TFT SCL           12     module's SPI clock pin; hw SPI (ESP32-S3 default pin)
-//   TFT SDA           11     module's SPI data pin; hw SPI (ESP32-S3 default pin)
-//   TFT BLK           6      backlight, driven HIGH = on
+//   TFT SCK           12     shared SPI bus (display + touch), explicit pins
+//   TFT MOSI          11     shared SPI bus
+//   TFT MISO          18     shared SPI bus (touch reads only)
+//   TFT LED (BLK)     6      backlight, driven HIGH = on
+//   Touch T_CS        7      XPT2046, same SPI bus, own chip select
+//   Touch T_IRQ       8      low when touch panel is pressed
 //   Compass SDA       21     QMC5883P, I2C addr 0x2C
 //   Compass SCL       14
 //   RS485 RX (RO)     4      UART2, Pelco-D - from the pan-tilt unit
@@ -26,18 +31,17 @@
 #include <WebServer.h>
 #include <SPI.h>
 #include <Preferences.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_ST7735.h>
 #include "config.h"
 #include "Qmc5883p.h"
 #include "Pelco.h"
 #include "web_page.h"
+#include "TouchUI.h"
 
-Adafruit_ST7735 tft(TFT_CS_PIN, TFT_DC_PIN, TFT_RST_PIN);
 Qmc5883p compass;
 WebServer server(80);
 PelcoController pelco;
 Preferences prefs;
+TouchUI touchUI;
 
 bool compassOk = false;
 bool wifiUsingFallbackAP = false;
@@ -190,7 +194,6 @@ bool tiltAtLimit(int dir) {
 // the other - each phase detected by real position going flat/stalled
 // rather than any fixed timing. Mirrors TickCalibratePhase() in the sibling
 // USB app's MainForm.cs.
-enum CalPhase { CAL_IDLE, CAL_PAN_MIN, CAL_PAN_MAX, CAL_TILT_MIN, CAL_TILT_MAX };
 CalPhase calPhase = CAL_IDLE;
 unsigned long calWindowStartMs = 0;
 float calWindowStartDeg = 0;
@@ -346,8 +349,6 @@ float currentAzimuth() {
 // a single frame, so two independent movers could stomp on each other's
 // commands. goSource exists only so /status can tell the web UI which
 // button's "driving/arrived" indicator to update.
-enum GoAxis { GO_NONE, GO_PAN, GO_TILT };
-enum GoSource { GO_SRC_NONE, GO_SRC_AZIMUTH, GO_SRC_PAN_MID, GO_SRC_TILT_ZERO };
 GoAxis goToAxis = GO_NONE;
 GoSource goSource = GO_SRC_NONE;
 float goToTargetDeg = 0;
@@ -520,40 +521,55 @@ void handleRoot() {
 // move command at the current jog speed, block for the duration that takes
 // at that speed, then stop. Blocking is intentional and simplest here -
 // the physical head genuinely needs that long to complete the step, and a
-// single button press has nothing else useful to do meanwhile.
-void handleStep() {
+// single button press has nothing else useful to do meanwhile. Shared by
+// the web UI's /move handler and the touch UI's D-pad (see TouchUI.h).
+// Returns false if the move was refused because the axis is at its
+// calibrated limit.
+bool doStep(bool pan, int dir) {
     stopGoTo(); // manual jog overrides any in-progress closed-loop drive
-
-    String axis = server.arg("axis");
-    int dir = server.arg("dir").toInt() >= 0 ? 1 : -1;
-
-    if (axis == "pan") {
-        if (panAtLimit(dir)) { server.send(409, "text/plain", "limit"); return; }
+    if (pan) {
+        if (panAtLimit(dir)) return false;
         pelco.sendMove(RS485_ADDRESS, dir < 0, dir > 0, false, false, jogSpeed, jogSpeed);
         delay(panStepMs());
         pelco.sendStop(RS485_ADDRESS);
         panPositionDeg += dir * PELCO_STEP_DEG;
         correctPanDrift();
-    } else if (axis == "tilt") {
-        if (tiltAtLimit(dir)) { server.send(409, "text/plain", "limit"); return; }
+    } else {
+        if (tiltAtLimit(dir)) return false;
         pelco.sendMove(RS485_ADDRESS, false, false, dir > 0, dir < 0, jogSpeed, jogSpeed);
         delay(tiltStepMs());
         pelco.sendStop(RS485_ADDRESS);
         tiltPositionDeg += dir * PELCO_STEP_DEG;
         correctTiltDrift();
-    } else {
+    }
+    return true;
+}
+
+void handleStep() {
+    String axis = server.arg("axis");
+    int dir = server.arg("dir").toInt() >= 0 ? 1 : -1;
+
+    if (axis != "pan" && axis != "tilt") {
         server.send(400, "text/plain", "bad axis");
+        return;
+    }
+    if (!doStep(axis == "pan", dir)) {
+        server.send(409, "text/plain", "limit");
         return;
     }
     server.send(200, "text/plain", "ok");
 }
 
 // Safety/manual use (e.g. testing via curl) - the head already stops itself
-// at the end of each step in handleStep(), so the web UI doesn't call this
+// at the end of each step in doStep(), so the web UI doesn't call this
 // directly, though it also cancels any in-progress closed-loop drive.
-void handleStop() {
+void doStop() {
     stopGoTo();
     pelco.sendStop(RS485_ADDRESS);
+}
+
+void handleStop() {
+    doStop();
     server.send(200, "text/plain", "ok");
 }
 
@@ -567,42 +583,55 @@ void handleStop() {
 // delta needed in raw space too. Driving off a fresh reading like this
 // means the result can't inherit any drift accumulated since the last
 // correction, unlike the old dead-reckoned pulse-counting approach.
-void handleGoAzimuth() {
-    if (!homeAzimuthSet) { server.send(409, "text/plain", "home not set"); return; }
-    float t = fmodf(server.arg("target").toFloat(), 360.0f);
+GoAzimuthResult doGoAzimuth(float targetDeg) {
+    if (!homeAzimuthSet) return GOAZ_NO_HOME;
+    float t = fmodf(targetDeg, 360.0f);
     if (t < 0) t += 360.0f;
 
     float currentRaw;
-    if (!pelco.queryPositionDeg(RS485_ADDRESS, true, currentRaw)) {
-        server.send(504, "text/plain", "no reply");
-        return;
-    }
+    if (!pelco.queryPositionDeg(RS485_ADDRESS, true, currentRaw)) return GOAZ_NO_REPLY;
     rawPanDeg = currentRaw;
     rawPanKnown = true;
 
     // Shortest signed distance from the current Azimut to the target, in (-180, 180].
     float diff = fmodf(t - currentAzimuth() + 540.0f, 360.0f) - 180.0f;
     startGoTo(true, currentRaw + diff, GO_SRC_AZIMUTH);
+    return GOAZ_OK;
+}
+
+void handleGoAzimuth() {
+    GoAzimuthResult r = doGoAzimuth(server.arg("target").toFloat());
+    if (r == GOAZ_NO_HOME) { server.send(409, "text/plain", "home not set"); return; }
+    if (r == GOAZ_NO_REPLY) { server.send(504, "text/plain", "no reply"); return; }
     server.send(200, "text/plain", "ok");
 }
 
 // Drives pan straight to its calibrated center (PAN_MID_TARGET_DEG) - see
 // updateGoTo() in loop().
-void handleGoToPanMid() {
+void doGoToPanMid() {
     startGoTo(true, PAN_MID_TARGET_DEG, GO_SRC_PAN_MID);
+}
+void handleGoToPanMid() {
+    doGoToPanMid();
     server.send(200, "text/plain", "ok");
 }
 
 // Drives tilt straight to its level/zero position (TILT_ZERO_TARGET_DEG).
-void handleGoToTiltZero() {
+void doGoToTiltZero() {
     startGoTo(false, TILT_ZERO_TARGET_DEG, GO_SRC_TILT_ZERO);
+}
+void handleGoToTiltZero() {
+    doGoToTiltZero();
     server.send(200, "text/plain", "ok");
 }
 
-void handleHome() {
+void doHome() {
     stopGoTo();
     pelco.callPreset(RS485_ADDRESS, PELCO_HOME_PRESET);
     resetPositionToHome(); // best-effort - assumes the head lands exactly at home
+}
+void handleHome() {
+    doHome();
     server.send(200, "text/plain", "ok");
 }
 
@@ -611,13 +640,13 @@ void handleHome() {
 // HOME preset, and saves the current compass heading as the home azimuth
 // reference (persisted to flash) - the Azimut display then reads relative
 // to this direction (0 = facing home) instead of raw compass heading.
-void handleSaveHome() {
+void doSaveHome() {
     stopGoTo();
     pelco.setPreset(RS485_ADDRESS, PELCO_HOME_PRESET);
     resetPositionToHome();
 
     // Capture the head's own raw position reading right now as the
-    // drift-correction reference - safe here (unlike handleHome()) because
+    // drift-correction reference - safe here (unlike doHome()) because
     // the head hasn't moved: this command just tells it to remember where
     // it already is, so "current raw position" and "home" are the same
     // point at this instant.
@@ -635,13 +664,16 @@ void handleSaveHome() {
         prefs.putFloat("homeAz", homeAzimuth);
         prefs.end();
     }
+}
+void handleSaveHome() {
+    doSaveHome();
     server.send(200, "text/plain", "ok");
 }
 
 // Reverts to live compass tracking - undoes Save Home (including the
 // persisted flash value), so Azimut goes back to following the compass
 // live instead of being frozen/dead-reckoned.
-void handleClearHome() {
+void doClearHome() {
     stopGoTo();
     homeAzimuthSet = false;
     homeAzimuth = 0.0f;
@@ -654,6 +686,9 @@ void handleClearHome() {
     tiltPositionDeg = 0.0f;
     panRawAtHomeKnown = false;
     tiltRawAtHomeKnown = false;
+}
+void handleClearHome() {
+    doClearHome();
     server.send(200, "text/plain", "ok");
 }
 
@@ -685,9 +720,7 @@ void savePresetInfoToPrefs(int idx) {
     prefs.end();
 }
 
-void handlePresetSet() {
-    uint8_t num;
-    if (!parsePresetNum(num)) { server.send(400, "text/plain", "bad preset"); return; }
+void doPresetSet(uint8_t num) {
     pelco.setPreset(RS485_ADDRESS, num);
 
     int idx = (int)num - PELCO_USER_PRESET_BASE;
@@ -704,12 +737,15 @@ void handlePresetSet() {
         }
         savePresetInfoToPrefs(idx);
     }
+}
+void handlePresetSet() {
+    uint8_t num;
+    if (!parsePresetNum(num)) { server.send(400, "text/plain", "bad preset"); return; }
+    doPresetSet(num);
     server.send(200, "text/plain", "ok");
 }
 
-void handlePresetGo() {
-    uint8_t num;
-    if (!parsePresetNum(num)) { server.send(400, "text/plain", "bad preset"); return; }
+void doPresetGo(uint8_t num) {
     stopGoTo();
     pelco.callPreset(RS485_ADDRESS, num);
     if (num == PELCO_HOME_PRESET) {
@@ -719,6 +755,11 @@ void handlePresetGo() {
         // mark position unknown rather than show a stale/wrong estimate.
         positionKnown = false;
     }
+}
+void handlePresetGo() {
+    uint8_t num;
+    if (!parsePresetNum(num)) { server.send(400, "text/plain", "bad preset"); return; }
+    doPresetGo(num);
     server.send(200, "text/plain", "ok");
 }
 
@@ -729,13 +770,16 @@ void handlePelcoCommand(const PelcoCommand &cmd) {
     (void)cmd;
 }
 
-void handleSetSpeed() {
-    int v = server.arg("value").toInt();
-    if (v < 1 || v > 63) { server.send(400, "text/plain", "bad speed"); return; }
-    jogSpeed = (uint8_t)v;
+void doSetSpeed(uint8_t v) {
+    jogSpeed = v;
     prefs.begin("pantilt", false);
     prefs.putUChar("speed", jogSpeed);
     prefs.end();
+}
+void handleSetSpeed() {
+    int v = server.arg("value").toInt();
+    if (v < 1 || v > 63) { server.send(400, "text/plain", "bad speed"); return; }
+    doSetSpeed((uint8_t)v);
     server.send(200, "text/plain", "ok");
 }
 
@@ -744,29 +788,36 @@ void handleAutoCalibrate() {
     server.send(200, "text/plain", "ok");
 }
 
-void handleCancelCalibrate() {
+void doCancelCalibrate() {
     if (calPhase != CAL_IDLE) {
         pelco.sendStop(RS485_ADDRESS);
         calPhase = CAL_IDLE;
         calMessage = "Cancelled";
     }
+}
+void handleCancelCalibrate() {
+    doCancelCalibrate();
     server.send(200, "text/plain", "ok");
 }
 
 // Manual alternative to Auto Calibrate: jog to a mechanical limit with the
 // direction buttons, then capture it here - useful if the automatic stall
-// scan isn't reliable for a given axis.
-void handleCalLimit() {
-    bool pan = server.arg("axis") == "pan";
-    bool isMin = server.arg("which") == "min";
+// scan isn't reliable for a given axis. Returns false if the head didn't reply.
+bool doCalLimit(bool pan, bool isMin) {
     float raw;
-    if (!pelco.queryPositionDeg(RS485_ADDRESS, pan, raw)) {
-        server.send(504, "text/plain", "no reply");
-        return;
-    }
+    if (!pelco.queryPositionDeg(RS485_ADDRESS, pan, raw)) return false;
     if (pan) { if (isMin) { panLimitMinDeg = raw; panLimitMinKnown = true; } else { panLimitMaxDeg = raw; panLimitMaxKnown = true; } }
     else { if (isMin) { tiltLimitMinDeg = raw; tiltLimitMinKnown = true; } else { tiltLimitMaxDeg = raw; tiltLimitMaxKnown = true; } }
     saveLimitsToPrefs();
+    return true;
+}
+void handleCalLimit() {
+    bool pan = server.arg("axis") == "pan";
+    bool isMin = server.arg("which") == "min";
+    if (!doCalLimit(pan, isMin)) {
+        server.send(504, "text/plain", "no reply");
+        return;
+    }
     server.send(200, "text/plain", "ok");
 }
 
@@ -816,61 +867,6 @@ void handleStatus() {
     server.send(200, "application/json", buf);
 }
 
-void drawStaticScreen() {
-    tft.fillScreen(ST77XX_BLACK);
-    tft.setTextColor(ST77XX_WHITE);
-    tft.setTextSize(1);
-    tft.setCursor(4, 4);
-    tft.println(wifiLabel + ":");
-    tft.setCursor(4, 14);
-    tft.println(ipStr);
-    tft.drawFastHLine(0, 26, tft.width(), ST77XX_CYAN);
-}
-
-void updateDisplay() {
-    static float lastHeading = -9999, lastPan = -9999, lastTilt = -9999;
-    static unsigned long lastUpdateMs = 0;
-
-    if (millis() - lastUpdateMs < 300) return; // cap TFT refresh rate
-    lastUpdateMs = millis();
-
-    bool azOk = azimuthAvailable();
-    float heading = azOk ? currentAzimuth() : lastHeading;
-    float pan = panPositionDeg;
-    float tilt = tiltPositionDeg;
-
-    if (fabs(heading - lastHeading) < 0.5f && fabs(pan - lastPan) < 0.1f && fabs(tilt - lastTilt) < 0.1f) {
-        return; // nothing meaningfully changed, skip redraw to avoid flicker
-    }
-    lastHeading = heading;
-    lastPan = pan;
-    lastTilt = tilt;
-
-    tft.fillRect(0, 32, tft.width(), tft.height() - 32, ST77XX_BLACK);
-    tft.setTextSize(2);
-    tft.setTextColor(azOk ? ST77XX_CYAN : ST77XX_RED);
-    tft.setCursor(4, 38);
-    if (azOk) {
-        tft.printf("Azimut %6.1f", heading);
-    } else {
-        tft.print("NO COMPASS");
-    }
-
-    tft.setTextColor(positionKnown ? ST77XX_YELLOW : ST77XX_RED);
-    tft.setCursor(4, 58);
-    if (positionKnown) {
-        tft.printf("Pan  %6.1f", pan);
-    } else {
-        tft.print("Pan     ??");
-    }
-    tft.setCursor(4, 78);
-    if (positionKnown) {
-        tft.printf("Tilt %6.1f", tilt);
-    } else {
-        tft.print("Tilt    ??");
-    }
-}
-
 void logCompass() {
     if (millis() - lastCompassLogMs < 1000) return;
     lastCompassLogMs = millis();
@@ -901,25 +897,18 @@ void scanI2C() {
 
 void setup() {
     Serial.begin(115200);
-
-    pinMode(TFT_BLK_PIN, OUTPUT);
-    digitalWrite(TFT_BLK_PIN, HIGH); // backlight on
-
-    // Lowered from the 16MHz default - random colorful static that never
-    // resolves into an image is the classic symptom of SPI signal integrity
-    // problems on breadboard jumper wires; a slower clock is more tolerant
-    // of that. Raise this back up once wiring is confirmed solid.
-    tft.setSPISpeed(4000000);
-    tft.initR(INITR_BLACKTAB); // switch to INITR_GREENTAB if colors look wrong
-    tft.setRotation(1);        // landscape, 160x128
+    delay(500); // give the USB CDC host side a moment to attach before the first prints
+    Serial.println("checkpoint: setup start");
 
     compassOk = compass.begin();
+    Serial.println("checkpoint: after compass.begin");
     if (!compassOk) {
         Serial.println("QMC5883P not found - check wiring (SDA=21/SCL=14) and I2C address 0x2C");
         scanI2C();
     }
 
     pelco.begin(Serial2, RS485_RX_PIN, RS485_TX_PIN, RS485_DE_RE_PIN, RS485_BAUD);
+    Serial.println("checkpoint: after pelco.begin");
 
     prefs.begin("pantilt", true);
     homeAzimuthSet = prefs.isKey("homeAz");
@@ -944,8 +933,11 @@ void setup() {
     }
     prefs.end();
 
+    Serial.println("checkpoint: before setupWifi");
     setupWifi();
-    drawStaticScreen();
+    Serial.println("checkpoint: before touchUI.begin");
+    touchUI.begin();
+    Serial.println("checkpoint: after touchUI.begin");
 
     server.on("/", handleRoot);
     server.on("/move", handleStep);
@@ -978,6 +970,6 @@ void loop() {
         handlePelcoCommand(pelcoCmd);
     }
 
-    updateDisplay();
+    touchUI.update();
     logCompass();
 }
