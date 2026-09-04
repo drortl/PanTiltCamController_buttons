@@ -9,21 +9,24 @@ const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pan/Tilt Camera</title>
 <style>
-  body { font-family: sans-serif; text-align: center; background:#111; color:#eee; margin:0; padding:16px; }
+  * { box-sizing:border-box; }
+  body { font-family: sans-serif; font-size:18px; text-align: center; background:#111; color:#eee; margin:0; padding:16px; overflow-x:hidden; }
   h2 { margin: 8px 0 16px; }
-  .status { background:#222; border-radius:10px; padding:10px; margin-bottom:20px; display:inline-block; min-width:220px; }
+  .status { background:#222; border-radius:10px; padding:10px; margin-bottom:20px; display:inline-block; min-width:220px; font-size:24px; }
   .status div { padding:2px 0; }
+  .status div:first-child { font-size:24px; }
   .pad { display:grid; grid-template-columns: 70px 70px 70px; grid-template-rows: 70px 70px 70px; gap:8px; justify-content:center; margin-bottom:20px; }
   button { font-size:22px; border:none; border-radius:10px; background:#2d6cdf; color:#fff; touch-action:none; user-select:none; }
   button:active { background:#1a4fb0; }
   button:disabled { opacity:0.5; }
-  #home { background:#d94f2b; font-size:16px; padding:12px 24px; border-radius:10px; }
-  #saveHome { background:#6b2fa0; font-size:14px; padding:10px 18px; border-radius:10px; margin-left:8px; }
-  #clearHome { background:#444; font-size:13px; padding:8px 14px; border-radius:10px; margin-left:8px; }
+  #home, #saveHome, #clearHome { font-size:18px; border-radius:10px; }
+  #home { background:#d94f2b; padding:12px 24px; }
+  #saveHome { background:#2b9e4f; padding:10px 18px; margin-left:8px; }
+  #clearHome { background:#c0392b; padding:10px 18px; margin-left:8px; }
   .b1{grid-column:2;grid-row:1;} .b2{grid-column:1;grid-row:2;} .b3{grid-column:3;grid-row:2;} .b4{grid-column:2;grid-row:3;}
   .pad button { background:#c0392b; }
   .pad button.arrived { background:#2b9e4f; }
-  .presets { margin-top:20px; display:flex; gap:8px; justify-content:center; align-items:center; }
+  .presets { margin-top:20px; display:flex; gap:8px; justify-content:center; align-items:center; flex-wrap:wrap; }
   .presets input { width:56px; font-size:18px; padding:8px; border-radius:8px; border:none; text-align:center; }
   .presets button { font-size:16px; padding:10px 16px; }
   #goAzimuthBtn { background:#2d6cdf; }
@@ -34,6 +37,9 @@ const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
   .speedRow { display:flex; align-items:center; gap:10px; }
   .speedRow input[type=range] { flex:1; }
   .speedRow span { min-width:28px; text-align:right; }
+    .stepRow { display:flex; align-items:center; gap:8px; margin-top:8px; }
+    .stepRow label { flex:1; }
+    .stepRow input { width:64px; font-size:16px; padding:6px; border-radius:6px; border:none; text-align:right; }
   .presetRow { display:flex; align-items:center; gap:8px; margin-top:8px; }
   .presetRow > span { flex:1; }
   .presetInfo { display:block; font-size:11px; color:#9ab; }
@@ -51,6 +57,20 @@ const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
   .limitAxis .row { display:flex; gap:6px; align-items:center; }
   .limitAxis .row span { flex:1; font-size:13px; }
   .limitAxis .row button { font-size:12px; padding:6px 10px; }
+  @media (max-width:600px) {
+    body { padding:10px; }
+    h2 { font-size:22px; margin:6px 0 12px; }
+    .status, .panel { width:100%; min-width:0; }
+    .status { margin-bottom:14px; }
+    .pad { grid-template-columns:repeat(3, minmax(54px, 72px)); grid-template-rows:repeat(3, 64px); gap:6px; margin-bottom:14px; }
+    .pad button { font-size:20px; }
+    #home, #saveHome, #clearHome { margin:4px 2px; }
+    .presets { margin-top:14px; }
+    .presets input { width:72px; }
+    .panel { padding:12px; margin-top:14px; }
+    .calRow button { flex:1 1 120px; }
+    .limitAxis .row span { min-width:0; }
+  }
 </style>
 </head>
 <body>
@@ -78,6 +98,14 @@ const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
   <div class="speedRow">
     <input type="range" id="speedSlider" min="1" max="63" value="63">
     <span id="speedVal">63</span>
+  </div>
+  <div class="stepRow">
+    <label for="panStepInput">Pan step (deg)</label>
+    <input type="number" id="panStepInput" min="0.1" max="20" step="0.1" value="2">
+  </div>
+  <div class="stepRow">
+    <label for="tiltStepInput">Tilt step (deg)</label>
+    <input type="number" id="tiltStepInput" min="0.1" max="20" step="0.1" value="1">
   </div>
 </div>
 
@@ -167,6 +195,14 @@ speedSlider.addEventListener('input', () => { speedVal.textContent = speedSlider
 speedSlider.addEventListener('change', () => {
   fetch(`/setSpeed?value=${speedSlider.value}`).catch(()=>{});
 });
+
+const panStepInput = document.getElementById('panStepInput');
+const tiltStepInput = document.getElementById('tiltStepInput');
+function saveSteps() {
+  fetch(`/setSteps?pan=${panStepInput.value}&tilt=${tiltStepInput.value}`).catch(()=>{});
+}
+panStepInput.addEventListener('change', saveSteps);
+tiltStepInput.addEventListener('change', saveSteps);
 
 // Three user position presets (preset numbers 2-4; preset 1 is HOME - see
 // PELCO_USER_PRESET_BASE/COUNT in config.h). Save asks for confirmation
@@ -275,6 +311,8 @@ function poll() {
     }
 
     if (document.activeElement !== speedSlider) {
+        if (document.activeElement !== panStepInput) panStepInput.value = s.panStep;
+        if (document.activeElement !== tiltStepInput) tiltStepInput.value = s.tiltStep;
       speedSlider.value = s.speed;
       speedVal.textContent = s.speed;
     }

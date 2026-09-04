@@ -14,10 +14,28 @@ class Qmc5883p {
 public:
     bool begin() {
         Wire.begin(COMPASS_SDA_PIN, COMPASS_SCL_PIN);
-        writeReg(MODE_REG, 0xCF);   // continuous mode, 200Hz ODR, 8x oversampling
-        writeReg(CONFIG_REG, 0x08); // set/reset on, 8G range
-        Wire.beginTransmission(QMC5883P_ADDR);
-        return Wire.endTransmission() == 0;
+        // Bounds every I2C transaction below (here and in read()) to 50ms,
+        // so a stuck bus (shorted/miswired SDA or SCL) fails fast instead
+        // of blocking - read() runs once per main loop() iteration whenever
+        // home isn't saved, so an unbounded stall there would drag down
+        // the whole board, not just the compass.
+        Wire.setTimeOut(50);
+        // An ACK'd write only proves the byte was acknowledged, not that
+        // the correct value actually landed in the register - on marginal
+        // wiring, bit corruption can still ACK. Write then read the mode
+        // register back and require it to match, retrying a few times,
+        // before trusting the chip is really in continuous mode. Without
+        // this, a corrupted mode write can leave the chip stuck in its
+        // power-on idle state, silently reporting begin()==true while
+        // read() returns the same frozen bytes forever.
+        bool modeVerified = false;
+        for (int attempt = 0; attempt < 3 && !modeVerified; attempt++) {
+            writeReg(MODE_REG, 0xCF);   // continuous mode, 200Hz ODR, 8x oversampling
+            uint8_t readBack;
+            modeVerified = readReg(MODE_REG, readBack) && readBack == 0xCF;
+        }
+        bool configOk = writeReg(CONFIG_REG, 0x08); // set/reset on, 8G range
+        return modeVerified && configOk;
     }
 
     bool read(int16_t &x, int16_t &y, int16_t &z) {
@@ -53,10 +71,19 @@ private:
 
     float lastHeading = 0.0f;
 
-    void writeReg(uint8_t reg, uint8_t val) {
+    bool writeReg(uint8_t reg, uint8_t val) {
         Wire.beginTransmission(QMC5883P_ADDR);
         Wire.write(reg);
         Wire.write(val);
-        Wire.endTransmission();
+        return Wire.endTransmission() == 0;
+    }
+
+    bool readReg(uint8_t reg, uint8_t &val) {
+        Wire.beginTransmission(QMC5883P_ADDR);
+        Wire.write(reg);
+        if (Wire.endTransmission(false) != 0) return false;
+        if (Wire.requestFrom(QMC5883P_ADDR, 1) != 1) return false;
+        val = Wire.read();
+        return true;
     }
 };

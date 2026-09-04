@@ -13,20 +13,26 @@
 //
 // Signal                   GPIO   Notes
 // ----------------------------------------------------------------------------
-// TFT CS                   5      ST7796S, 480x320, 4-wire SPI (module: MSP4021)
-// TFT DC/RS                17
-// TFT RST                  16
-// TFT SCK                  12     shared SPI bus (display + touch), explicit (not core default)
-// TFT SDI/MOSI             11     shared SPI bus (display + touch)
-// TFT SDO/MISO             18     shared SPI bus - only actually driven by touch reads
-// TFT LED (backlight)      6      driven HIGH = on
-// Touch T_CS               7      XPT2046, same SPI bus as TFT, own chip select
-// Touch T_IRQ              8      low when touch panel is pressed
-// Compass SDA               21    QMC5883P, I2C addr 0x2C
-// Compass SCL               14
-// RS485 RX  (module RO)      4    UART2, Pelco-D - to the pan-tilt unit
-// RS485 TX  (module DI)      13   UART2, Pelco-D - to the pan-tilt unit
-// RS485 DE/RE (module DE+/RE) 15  tie module's DE and /RE pins together here
+// RS485 RX  (module RO)    4      UART2, Pelco-D - to the pan-tilt unit
+// RS485 TX  (module DI)    5      UART2, Pelco-D - to the pan-tilt unit
+// RS485 DE/RE (DE+/RE)     6      tie module's DE and /RE pins together here
+// Compass SDA              7      QMC5883P, I2C addr 0x2C
+// Compass SCL              15
+// TFT BLK                  16     backlight, driven HIGH = on
+// TFT CS                   17     ST7735, 128x160
+// TFT DC                   18
+// TFT RST                  8
+// Button ADC                9     five-button resistor-ladder pad
+// TFT SDA  (hw SPI, fixed) 11     module's SPI data pin; ESP32-S3 default SPI pin
+// TFT SCL  (hw SPI, fixed) 12     module's SPI clock pin; ESP32-S3 default SPI pin
+//
+// All 12 signals above live on header J1 alone, grouped into contiguous
+// runs by peripheral (RS485 -> Compass -> TFT) for easy hand-soldering -
+// nothing is wired to the opposite header (J3) anymore. GPIO3/GPIO46, which
+// fall physically in the middle of that run, are strapping pins and stay
+// unconnected (see the reserved list above) - that gap is unavoidable on
+// any layout. TFT's hw-SPI SCL/SDA keep the ESP32-S3's default pins, a
+// short reach past TFT RST on the same row.
 // ============================================================================
 // The pan/tilt motion itself is handled entirely by an external
 // self-contained pan-tilt head (internal stepper + MCU, PELCO-D/P
@@ -47,50 +53,33 @@
 #define AP_SSID         "PanTiltCam-Setup"
 #define AP_PASSWORD     "12345678"   // min 8 chars, required by WiFi.softAP
 
-// ---------- TFT (ST7796S, 480x320, 4-wire SPI) + XPT2046 touch ----------
-// Display and touch chip share one physical SPI bus (SCK/MOSI/MISO) with
-// separate chip-selects - see TouchUI.h. MISO is only actually driven by
-// the touch chip (the display is write-only), but is wired through anyway
-// since it's the same 4 header pins on the module either way.
-// Explicit pins throughout (not the ESP32-S3 hw-SPI defaults) because the
-// default MISO (GPIO13) is already RS485_TX_PIN on this board.
-#define TFT_CS_PIN      5
-#define TFT_DC_PIN      17
-#define TFT_RST_PIN     16
-#define TFT_SCK_PIN     12
-#define TFT_MOSI_PIN    11
-#define TFT_MISO_PIN    18
-#define TFT_BLK_PIN     6
-#define TOUCH_CS_PIN    7
-#define TOUCH_IRQ_PIN   8
+// ---------- TFT (ST7735, 128x160, hardware SPI) ----------
+#define TFT_CS_PIN      17
+#define TFT_DC_PIN      18
+#define TFT_RST_PIN     8
+#define TFT_BLK_PIN     16
+// SCL=12, SDA=11 (the module's labels for SPI clock/data - not I2C) are the
+// ESP32-S3 default hardware SPI pins, used automatically by the library
+// since no explicit SPI pins are passed.
+// If colors look wrong/inverted, switch INITR_BLACKTAB to INITR_GREENTAB in main.cpp.
 
-// Raw XPT2046 ADC range (0-4095) mapped to screen pixels - resistive touch
-// panels vary unit to unit, these are typical defaults for this module.
-// If touch feels off (dead zones at the edges, or reversed axes), watch the
-// "touch raw=.." line TouchUI.h prints to Serial on each press and adjust
-// these to match what you actually see at the screen corners; swap the min/
-// max of an axis if it reads backwards.
-#define TOUCH_RAW_MINX  300
-#define TOUCH_RAW_MAXX  3800
-#define TOUCH_RAW_MINY  300
-#define TOUCH_RAW_MAXY  3800
-// The touch chip's raw X/Y are wired to the resistive film's physical axes,
-// not to the display's setRotation() - if touches consistently land with X
-// and Y transposed (e.g. dragging left-right on screen moves the touch
-// point up-down), set this to 1 instead of adjusting MINX/MAXX/MINY/MAXY.
-#define TOUCH_SWAP_XY   0
+// ---------- Five-button analog input module ----------
+// The module uses one resistor ladder output. Measured resistance from OUT
+// to GND is S4=0, S1=330 ohm, S2=940 ohm, S3=1.9 kohm, S5=5 kohm. With the
+// module's approximately 10 kohm pull-up, these are the ADC class limits.
+// GPIO9 (not GPIO1) so it stays in the ADC1 range (GPIO1-10) - ADC2 isn't
+// reliable while WiFi is active.
+#define BUTTON_ADC_PIN 9
+#define BUTTON_THRESHOLD_COUNT 5
+static const uint16_t BUTTON_ADC_THRESHOLDS[BUTTON_THRESHOLD_COUNT] = {
+	16, 60, 124, 251, 450
+};
 
-// This project's original 1.8" TFT needed 4MHz for signal integrity on
-// breadboard jumper wires - starting this new, much larger panel at the
-// same proven-safe speed rather than guessing higher. Note this only
-// controls draw calls made AFTER tft.init() (see TouchUI::begin()) - the
-// display's one-time init command sequence always runs at the Adafruit
-// ST7735/ST7789 library's own hardcoded 32MHz, which this can't override;
-// if the screen stays blank/white, that fixed-speed init sequence failing
-// on the wiring is the most likely cause. Raise this once wiring is
-// confirmed solid (a full-screen redraw at 4MHz is ~0.6s, visibly slow for
-// a touch UI).
-#define TFT_SPI_SPEED_HZ 4000000
+// ADC classes are ordered by resistance, not by the labels printed on the
+// module: 0 ohm is S4, followed by S1, S2, S3, and S5.
+static const uint8_t BUTTON_CLASS_TO_SWITCH[BUTTON_THRESHOLD_COUNT] = {
+	3, 0, 1, 2, 4
+};
 
 // ---------- Digital compass (QMC5883P, I2C) ----------
 #define COMPASS_SDA_PIN 21
@@ -113,25 +102,59 @@
 // Talks to an external pan-tilt head (own internal motor + MCU) whose
 // address is set via its onboard DIP switches 1-6, baud via switches 7-8.
 #define RS485_RX_PIN     4
-#define RS485_TX_PIN     13
-#define RS485_DE_RE_PIN  15
+#define RS485_TX_PIN     5
+#define RS485_DE_RE_PIN  6
 #define RS485_BAUD       2400   // common Pelco default - change to match the pan-tilt unit's DIP setting
 #define RS485_ADDRESS    1      // pan-tilt unit's Pelco address (its DIP switches 1-6)
 
 #define PELCO_HOME_PRESET 1     // preset number the pan-tilt head calls on "HOME"
 
+// Home button (S5) is overloaded by hold duration:
+//   released within HOME_MAX_MS                            -> Home
+//   released within [SAVE_HOME_MIN_MS, SAVE_HOME_MAX_MS]    -> Save Home
+//   held past CLEAR_HOME_MIN_MS                             -> Clear Home,
+//     fires immediately at that instant (button still held) so it can't be
+//     missed by overshooting or under-releasing; further holding/release
+//     after that does nothing more
+//   released in the gap between Home and Save Home (e.g. ~3s) -> nothing
+//     (buffer zone against mis-timed releases, not meant to be relied on)
+// Home/Save Home bands are deliberately wide - a human has no on-screen
+// countdown while holding, so a 1-2s target window (the original design)
+// was unhittable in practice.
+#define HOME_MAX_MS        2000
+#define SAVE_HOME_MIN_MS   4000
+#define SAVE_HOME_MAX_MS   15000
+#define CLEAR_HOME_MIN_MS  25000
+
+// How long the "HOME" / "SAVE HOME" / "CLEAR HOME" confirmation stays on
+// the TFT's status row (triggered by button or web UI).
+#define STATUS_MESSAGE_MS 5000
+
+// Home button (S5) is overloaded by hold duration: a short press (released
+// before HOME_HOLD_SAVE_MS) calls Home; holding to HOME_HOLD_SAVE_MS fires
+// Save Home; holding on to HOME_HOLD_CLEAR_MS fires Clear Home instead (Save
+// Home does not also fire). Each fires once, immediately at its threshold,
+// while the button is still held - see updatePhysicalButtons() in main.cpp.
+#define HOME_HOLD_SAVE_MS  5000
+#define HOME_HOLD_CLEAR_MS 30000
+
+// How long a "HOME" / "SAVE HOME" / "CLEAR HOME" confirmation stays on the
+// TFT's status row after being triggered (by button or web UI).
+#define STATUS_MESSAGE_MS  5000
+
 // Pelco-D has no "move by N degrees" command - only "move until stopped".
 // The head does answer a non-standard position-query extension (see
 // queryPositionDeg() in Pelco.h), used to correct drift after each move,
 // but there's still no "move to N degrees" command - each button press is
-// turned into a fixed PELCO_STEP_DEG move by sending a move command at the
+// turned into a fixed axis step by sending a move command at the
 // current jog speed (adjustable via the web UI, see jogSpeed in main.cpp)
 // for a computed duration, then stopping: duration scales with jog speed
 // since the head's angular rate is assumed proportional to the speed byte.
 // PELCO_MAX_PAN/TILT_SPEED_DEG_S are the unit's rated max speed (14 deg/s
 // pan, 2 deg/s tilt at speed byte 63, per its manual) - re-measure against
-// a known angle and adjust if the actual step size drifts from 5 degrees.
-#define PELCO_STEP_DEG             5.0f
+// a known angle and adjust if the actual step size drifts.
+#define DEFAULT_PAN_STEP_DEG       2.0f
+#define DEFAULT_TILT_STEP_DEG      1.0f
 #define PELCO_STEP_SPEED           63     // default jog speed (0-63), adjustable via web UI
 #define PELCO_MAX_PAN_SPEED_DEG_S  14.0f
 #define PELCO_MAX_TILT_SPEED_DEG_S 2.0f
@@ -178,15 +201,3 @@
 // go to it" slots (uses the head's own preset memory via setPreset/callPreset).
 #define PELCO_USER_PRESET_COUNT 3
 #define PELCO_USER_PRESET_BASE  2
-
-// ---------- Shared state enums ----------
-// Defined here (rather than in main.cpp) so both main.cpp and TouchUI.h can
-// declare `extern` globals of these types without one having to include the
-// other.
-enum CalPhase { CAL_IDLE, CAL_PAN_MIN, CAL_PAN_MAX, CAL_TILT_MIN, CAL_TILT_MAX };
-enum GoAxis { GO_NONE, GO_PAN, GO_TILT };
-enum GoSource { GO_SRC_NONE, GO_SRC_AZIMUTH, GO_SRC_PAN_MID, GO_SRC_TILT_ZERO };
-// Result codes for doGoAzimuth(), since it has two distinct failure modes
-// the caller needs to tell apart (the web UI maps them to different HTTP
-// statuses; the touch UI just ignores the distinction and no-ops).
-enum GoAzimuthResult { GOAZ_OK, GOAZ_NO_HOME, GOAZ_NO_REPLY };
