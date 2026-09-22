@@ -8,11 +8,12 @@ Format: date, then each change with its status.
 ## 2026-09-22
 
 ### Fixed
-- **RS485 watchdog reset / random reboots.** `queryPositionDeg()` in
-  [include/Pelco.h](include/Pelco.h) waited for the pan-tilt head's reply in a
-  tight loop with no `yield()`. If the head was slow to answer (or not
+- **22:12** — **RS485 watchdog reset / random reboots.** `queryPositionDeg()`
+  in [include/Pelco.h](include/Pelco.h) waited for the pan-tilt head's reply
+  in a tight loop with no `yield()`. If the head was slow to answer (or not
   connected), the loop could starve the watchdog and reset the ESP32
   (`TG1WDT_SYS_RST`). Added a `yield()` call inside the wait loop.
+  Commit `16528bc`.
   **Status: fix applied, build succeeds, awaiting flash + field confirmation.**
 
 ### Added (work in progress, currently stashed — not on `master`)
