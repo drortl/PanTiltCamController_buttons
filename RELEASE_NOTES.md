@@ -1,0 +1,50 @@
+# Release Notes
+
+All notable changes to this project are documented here, newest first.
+Format: date, then each change with its status.
+
+---
+
+## 2026-09-22
+
+### Fixed
+- **RS485 watchdog reset / random reboots.** `queryPositionDeg()` in
+  [include/Pelco.h](include/Pelco.h) waited for the pan-tilt head's reply in a
+  tight loop with no `yield()`. If the head was slow to answer (or not
+  connected), the loop could starve the watchdog and reset the ESP32
+  (`TG1WDT_SYS_RST`). Added a `yield()` call inside the wait loop.
+  **Status: fix applied, build succeeds, awaiting flash + field confirmation.**
+
+### Added (work in progress, currently stashed — not on `master`)
+- **WiFi auto-off.** Turns WiFi off after an idle timer, configurable
+  5-360 minutes (default 15) via a new switch in the web UI, plus a WiFi
+  status icon (on/off) on the TFT.
+  **Status: implemented and flashed once, but held back pending confirmation
+  that it is unrelated to the crash-loop investigation above.**
+
+### In progress (stashed, to be restored after the crash-loop is confirmed fixed)
+- Tilt-up button misreading as pan-left: `BUTTON_ADC_THRESHOLDS[0]` in
+  [include/config.h](include/config.h) lowered 16 → 8, and ADC sample
+  averaging in `main.cpp` raised 16 → 64. Also fixed in hardware (ground wire
+  routed too close to the S1 switch).
+- S5 (Home) button hold-duration retiming: Save Home now fires on release
+  between 5-10 sec held; Clear Home fires at 20 sec held (previously
+  4-15 sec and 25 sec).
+- Power-outage persistence: pan/tilt position, home reference, and direction
+  calibration now saved to flash (NVS) so they survive a reboot instead of
+  resetting.
+
+### Investigated, not adopted
+- `WiFi.persistent(false)` in `setupWifi()` — tried as a candidate fix for
+  the crash loop, made reset frequency worse. Reverted.
+
+---
+
+## Earlier history (from git log, before this file existed)
+
+- `75665df` — Swap to ST7735 LCD + button pad, fix compass reliability
+- `42facb8` — Home switch add func
+- `31b69eb` — replace lcd to ftf 4" touch
+- `cb74dc6` — update UI
+- `4aed861` — Updates compass setting
+- `1d84499` — Initial commit: ESP32-S3 pan-tilt camera controller

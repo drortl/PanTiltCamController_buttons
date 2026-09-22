@@ -100,6 +100,8 @@ public:
         unsigned long deadline = millis() + timeoutMs;
         while (n < sizeof(reply) && (long)(millis() - deadline) < 0) {
             if (port->available()) reply[n++] = port->read();
+            else yield(); // release the CPU while waiting - a tight spin here can starve
+                          // the watchdog if the head is slow to reply or not connected
         }
         if (n != sizeof(reply) || reply[0] != 0xFF) return false;
 
