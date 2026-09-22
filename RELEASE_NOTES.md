@@ -23,11 +23,16 @@ Format: date, then each change with its status.
   **Status: implemented and flashed once, but held back pending confirmation
   that it is unrelated to the crash-loop investigation above.**
 
+### Fixed
+- **22:35** — **Tilt-up button misread as pan-left.**
+  `BUTTON_ADC_THRESHOLDS[0]` in [include/config.h](include/config.h) lowered
+  16 → 8, and ADC sample averaging in `main.cpp` raised 16 → 64. Also fixed in
+  hardware (ground wire routed too close to the S1 switch). This was applied
+  and confirmed earlier in the session, lost during the crash-loop revert,
+  and re-applied here. Commit `15db23a`.
+  **Status: build succeeds, awaiting flash + field confirmation.**
+
 ### In progress (stashed, to be restored after the crash-loop is confirmed fixed)
-- Tilt-up button misreading as pan-left: `BUTTON_ADC_THRESHOLDS[0]` in
-  [include/config.h](include/config.h) lowered 16 → 8, and ADC sample
-  averaging in `main.cpp` raised 16 → 64. Also fixed in hardware (ground wire
-  routed too close to the S1 switch).
 - S5 (Home) button hold-duration retiming: Save Home now fires on release
   between 5-10 sec held; Clear Home fires at 20 sec held (previously
   4-15 sec and 25 sec).
