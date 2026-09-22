@@ -62,10 +62,10 @@ unsigned long lastButtonMonitorMs = 0;
 
 int readButton() {
     uint32_t total = 0;
-    for (int sample = 0; sample < 16; sample++) {
+    for (int sample = 0; sample < 64; sample++) {
         total += analogRead(BUTTON_ADC_PIN);
     }
-    int adcValue = total / 16;
+    int adcValue = total / 64;
     for (int button = 0; button < BUTTON_THRESHOLD_COUNT; button++) {
         if (adcValue < BUTTON_ADC_THRESHOLDS[button]) {
             return BUTTON_CLASS_TO_SWITCH[button];
@@ -687,10 +687,10 @@ void updateButtonSerialMonitor() {
     if (!buttonMonitorEnabled || millis() - lastButtonMonitorMs < 300) return;
     lastButtonMonitorMs = millis();
     uint32_t total = 0;
-    for (int sample = 0; sample < 16; sample++) {
+    for (int sample = 0; sample < 64; sample++) {
         total += analogRead(BUTTON_ADC_PIN);
     }
-    int adcValue = total / 16;
+    int adcValue = total / 64;
     int button = readButton();
     Serial.printf("button_adc=%d detected=%s\n", adcValue,
                   button >= 0 ? String("S") + (button + 1) : "none");

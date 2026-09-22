@@ -64,15 +64,19 @@
 // If colors look wrong/inverted, switch INITR_BLACKTAB to INITR_GREENTAB in main.cpp.
 
 // ---------- Five-button analog input module ----------
-// The module uses one resistor ladder output. Measured resistance from OUT
-// to GND is S4=0, S1=330 ohm, S2=940 ohm, S3=1.9 kohm, S5=5 kohm. With the
-// module's approximately 10 kohm pull-up, these are the ADC class limits.
+// The module uses one resistor ladder output. Nominal resistance from OUT to
+// GND is S4=0, S1=330 ohm, S2=940 ohm, S3=1.9 kohm, S5=5 kohm, but live ADC
+// capture (2026-09-22) showed the S4/S1 boundary sits much lower than the
+// nominal-resistance math predicts - S4 reads 0-7 and S1 reads 8-26 (ESP32
+// ADC is noisy/non-linear this close to 0V), not the ~0 vs ~130 the resistor
+// values alone would suggest. The old threshold of 16 sat inside S1's own
+// noise band, so it intermittently misread tilt-up (S1) as pan-left (S4).
 // GPIO9 (not GPIO1) so it stays in the ADC1 range (GPIO1-10) - ADC2 isn't
 // reliable while WiFi is active.
 #define BUTTON_ADC_PIN 9
 #define BUTTON_THRESHOLD_COUNT 5
 static const uint16_t BUTTON_ADC_THRESHOLDS[BUTTON_THRESHOLD_COUNT] = {
-	16, 60, 124, 251, 450
+	8, 60, 124, 251, 450
 };
 
 // ADC classes are ordered by resistance, not by the labels printed on the
