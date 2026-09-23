@@ -5,6 +5,22 @@ Format: date, then each change with its status.
 
 ---
 
+## 2026-09-23
+
+### Fixed
+- **10:49** — **Button thresholds re-centered using calibrated millivolts.**
+  Raw `analogRead()` counts read low near 0V, so the S4 (pan-left) / S1
+  (tilt-up) boundary had only ~1 count of margin. Buttons are now read with
+  `analogReadMilliVolts()` (eFuse-calibrated), averaged over 64 samples.
+  `BUTTON_ADC_THRESHOLDS` in [include/config.h](include/config.h) replaced by
+  `BUTTON_MV_THRESHOLDS` = 48, 183, 384, 775, 2200 mV: the midpoints between
+  meter readings of S4=0, S1=97mV, S2=268mV, S3=500mV, S5=1050mV, idle=~3.3V.
+  The serial monitor (`a`) now prints `button_mv=` instead of `button_adc=`.
+  Commit `20047d6`.
+  **Status: flashed and confirmed working much better.**
+
+---
+
 ## 2026-09-22
 
 ### Fixed
