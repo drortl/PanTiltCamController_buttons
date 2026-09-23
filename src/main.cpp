@@ -60,14 +60,20 @@ unsigned long lastButtonChangeMs = 0;
 bool buttonMonitorEnabled = false;
 unsigned long lastButtonMonitorMs = 0;
 
-int readButton() {
+// Calibrated pin voltage (eFuse ADC calibration), averaged over 64 samples.
+// Raw analogRead() counts read low near 0V, which squeezed the S4/S1 gap.
+int readButtonMilliVolts() {
     uint32_t total = 0;
     for (int sample = 0; sample < 64; sample++) {
-        total += analogRead(BUTTON_ADC_PIN);
+        total += analogReadMilliVolts(BUTTON_ADC_PIN);
     }
-    int adcValue = total / 64;
+    return total / 64;
+}
+
+int readButton() {
+    int milliVolts = readButtonMilliVolts();
     for (int button = 0; button < BUTTON_THRESHOLD_COUNT; button++) {
-        if (adcValue < BUTTON_ADC_THRESHOLDS[button]) {
+        if (milliVolts < BUTTON_MV_THRESHOLDS[button]) {
             return BUTTON_CLASS_TO_SWITCH[button];
         }
     }
@@ -679,20 +685,16 @@ void updateButtonSerialMonitor() {
             buttonMonitorEnabled = !buttonMonitorEnabled;
             lastButtonMonitorMs = 0;
             Serial.println(buttonMonitorEnabled
-                ? "Button monitor ON - press S1-S5 and record ADC values"
+                ? "Button monitor ON - press S1-S5 and record mV values"
                 : "Button monitor OFF - button control resumed");
         }
     }
 
     if (!buttonMonitorEnabled || millis() - lastButtonMonitorMs < 300) return;
     lastButtonMonitorMs = millis();
-    uint32_t total = 0;
-    for (int sample = 0; sample < 64; sample++) {
-        total += analogRead(BUTTON_ADC_PIN);
-    }
-    int adcValue = total / 64;
+    int milliVolts = readButtonMilliVolts();
     int button = readButton();
-    Serial.printf("button_adc=%d detected=%s\n", adcValue,
+    Serial.printf("button_mv=%d detected=%s\n", milliVolts,
                   button >= 0 ? String("S") + (button + 1) : "none");
 }
 

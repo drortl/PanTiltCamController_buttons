@@ -71,12 +71,16 @@
 // ADC is noisy/non-linear this close to 0V), not the ~0 vs ~130 the resistor
 // values alone would suggest. The old threshold of 16 sat inside S1's own
 // noise band, so it intermittently misread tilt-up (S1) as pan-left (S4).
+// Thresholds are now in calibrated millivolts (analogReadMilliVolts), which
+// fixes that low-end error. Meter readings (2026-09-23) with the module's
+// ~11 kohm pull-up to 3.3V: S4=0, S1=97mV, S2=268mV, S3=500mV, S5=1050mV,
+// idle=~3.3V. Each threshold is the midpoint between neighbouring buttons.
 // GPIO9 (not GPIO1) so it stays in the ADC1 range (GPIO1-10) - ADC2 isn't
 // reliable while WiFi is active.
 #define BUTTON_ADC_PIN 9
 #define BUTTON_THRESHOLD_COUNT 5
-static const uint16_t BUTTON_ADC_THRESHOLDS[BUTTON_THRESHOLD_COUNT] = {
-	8, 60, 124, 251, 450
+static const uint16_t BUTTON_MV_THRESHOLDS[BUTTON_THRESHOLD_COUNT] = {
+	48, 183, 384, 775, 2200
 };
 
 // ADC classes are ordered by resistance, not by the labels printed on the
