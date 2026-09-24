@@ -5,6 +5,27 @@ Format: date, then each change with its status.
 
 ---
 
+## 2026-09-24
+
+### Fixed
+- **15:11** — **TFT blinked about every 0.5 sec.** `updateDisplay()` in
+  `main.cpp` cleared the whole lower area with `fillRect` before each redraw.
+  At 4 MHz SPI this took ~60 ms and showed as a black flash, and compass noise
+  (≥0.5° change) triggered a redraw on most refresh cycles. Text is now drawn
+  with a black background and padded to a fixed width, so each line overwrites
+  its old pixels in place. The status line is cleared only when its text
+  changes. Commit `acc3c52`.
+  **Status: flashed and confirmed - much better.**
+
+### Changed
+- **15:11** — **Brighter TFT colors for outdoor use.** Azimut text cyan →
+  white. Error text ("NO COMPASS", "Pan ??", "Tilt ??") red → white (orange
+  was tried and rejected). Pan/Tilt stay yellow, status stays green.
+  Commit `acc3c52`.
+  **Status: flashed and confirmed.**
+
+---
+
 ## 2026-09-23
 
 ### Fixed
