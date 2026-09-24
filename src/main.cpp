@@ -1060,36 +1060,47 @@ void updateDisplay() {
     lastHeading = heading;
     lastPan = pan;
     lastTilt = tilt;
+    bool statusChanged = statusToShow != shownStatus;
     shownStatus = statusToShow;
 
-    tft.fillRect(0, 32, tft.width(), tft.height() - 32, ST77XX_BLACK);
+    // Text is drawn with a black background and padded to a fixed width, so
+    // each line overwrites its old pixels in place. Clearing the area first
+    // (fillRect) took ~60ms at 4MHz SPI and showed as a visible black flash.
+    char line[16];
     tft.setTextSize(2);
-    tft.setTextColor(azOk ? ST77XX_CYAN : ST77XX_RED);
+    tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
     tft.setCursor(4, 38);
     if (azOk) {
-        tft.printf("Azimut %6.1f", heading);
+        snprintf(line, sizeof(line), "Azimut %6.1f", heading);
     } else {
-        tft.print("NO COMPASS");
+        snprintf(line, sizeof(line), "NO COMPASS");
     }
+    tft.printf("%-13s", line);
 
-    tft.setTextColor(positionKnown ? ST77XX_YELLOW : ST77XX_RED);
+    tft.setTextColor(positionKnown ? ST77XX_YELLOW : ST77XX_WHITE, ST77XX_BLACK);
     tft.setCursor(4, 58);
     if (positionKnown) {
-        tft.printf("Pan  %6.1f", pan);
+        snprintf(line, sizeof(line), "Pan  %6.1f", pan);
     } else {
-        tft.print("Pan     ??");
+        snprintf(line, sizeof(line), "Pan     ??");
     }
+    tft.printf("%-13s", line);
     tft.setCursor(4, 78);
     if (positionKnown) {
-        tft.printf("Tilt %6.1f", tilt);
+        snprintf(line, sizeof(line), "Tilt %6.1f", tilt);
     } else {
-        tft.print("Tilt    ??");
+        snprintf(line, sizeof(line), "Tilt    ??");
     }
+    tft.printf("%-13s", line);
 
-    if (statusToShow.length() > 0) {
-        tft.setTextColor(holdCountdownActive ? ST77XX_YELLOW : ST77XX_GREEN);
-        tft.setCursor(4, 98);
-        tft.print(statusToShow);
+    // The status line can wrap, so it is cleared only when its text changes.
+    if (statusChanged) {
+        tft.fillRect(0, 98, tft.width(), tft.height() - 98, ST77XX_BLACK);
+        if (statusToShow.length() > 0) {
+            tft.setTextColor(holdCountdownActive ? ST77XX_YELLOW : ST77XX_GREEN, ST77XX_BLACK);
+            tft.setCursor(4, 98);
+            tft.print(statusToShow);
+        }
     }
 }
 
