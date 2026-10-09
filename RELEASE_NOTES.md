@@ -5,6 +5,22 @@ Format: date, then each change with its status.
 
 ---
 
+## 2026-10-09 (test)
+
+### Added
+- **Bluetooth LE control (test).** The ESP32-S3 has BLE only, so the WiFi
+  web page can't run over Bluetooth. Instead the device now advertises a BLE
+  service as `PanTiltCam` (`setupBle()` in `main.cpp`, runs alongside WiFi),
+  and a new Web Bluetooth page `ble/index.html` sends text commands to it
+  (step, stop, home, save/clear home, go to azimut, pan mid, tilt zero,
+  speed) and reads a compact status. Works in Chrome/Edge on Android and
+  PC, not on iPhone. Range is set by `BLE_TX_POWER` in `config.h` (0 dBm).
+  Jog and Go to Azimut logic is shared with the web UI (`doStep()`,
+  `doGoAzimuth()`). BLE adds ~21 KB RAM and ~590 KB flash.
+  **Status: built, not flashed.**
+
+---
+
 ## 2026-10-09
 
 ### Changed

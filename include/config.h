@@ -56,6 +56,15 @@
 #define AP_SSID         "PanTiltCam-Setup"
 #define AP_PASSWORD     "12345678"   // min 8 chars, required by WiFi.softAP
 
+// ---------- Bluetooth LE control (Web Bluetooth page: ble/index.html) ----------
+// UUIDs must match the ones in ble/index.html. BLE_TX_POWER sets the range:
+// lower = shorter range (ESP_PWR_LVL_N12 = -12 dBm ... ESP_PWR_LVL_P9 = +9 dBm).
+#define BLE_DEVICE_NAME  "PanTiltCam"
+#define BLE_SERVICE_UUID "7e1a0001-3c2b-4f5e-9a6d-1b2c3d4e5f60"
+#define BLE_CMD_UUID     "7e1a0002-3c2b-4f5e-9a6d-1b2c3d4e5f60"
+#define BLE_STATUS_UUID  "7e1a0003-3c2b-4f5e-9a6d-1b2c3d4e5f60"
+#define BLE_TX_POWER     ESP_PWR_LVL_N0   // 0 dBm
+
 // ---------- TFT (ST7735, 128x160, hardware SPI) ----------
 #define TFT_CS_PIN      17
 #define TFT_DC_PIN      18

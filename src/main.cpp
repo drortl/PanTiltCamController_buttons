@@ -30,6 +30,8 @@
 #include <WebServer.h>
 #include <SPI.h>
 #include <Preferences.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
 #include "config.h"
@@ -616,30 +618,33 @@ void handleRoot() {
 // at that speed, then stop. Blocking is intentional and simplest here -
 // the physical head genuinely needs that long to complete the step, and a
 // single button press has nothing else useful to do meanwhile.
-void handleStep() {
+// Shared by the web UI (handleStep()) and BLE (handleBleCommand()).
+// Returns false if the axis is already at its limit in that direction.
+bool doStep(bool pan, int dir) {
     stopGoTo(); // manual jog overrides any in-progress closed-loop drive
-
-    String axis = server.arg("axis");
-    int dir = server.arg("dir").toInt() >= 0 ? 1 : -1;
-
-    if (axis == "pan") {
-        if (panAtLimit(dir)) { server.send(409, "text/plain", "limit"); return; }
+    if (pan) {
+        if (panAtLimit(dir)) return false;
         pelco.sendMove(RS485_ADDRESS, dir < 0, dir > 0, false, false, jogSpeed, jogSpeed);
         delay(panStepMs());
         pelco.sendStop(RS485_ADDRESS);
         panPositionDeg += dir * panStepDeg;
         correctPanDrift();
-    } else if (axis == "tilt") {
-        if (tiltAtLimit(dir)) { server.send(409, "text/plain", "limit"); return; }
+    } else {
+        if (tiltAtLimit(dir)) return false;
         pelco.sendMove(RS485_ADDRESS, false, false, dir > 0, dir < 0, jogSpeed, jogSpeed);
         delay(tiltStepMs());
         pelco.sendStop(RS485_ADDRESS);
         tiltPositionDeg += dir * tiltStepDeg;
         correctTiltDrift();
-    } else {
-        server.send(400, "text/plain", "bad axis");
-        return;
     }
+    return true;
+}
+
+void handleStep() {
+    String axis = server.arg("axis");
+    int dir = server.arg("dir").toInt() >= 0 ? 1 : -1;
+    if (axis != "pan" && axis != "tilt") { server.send(400, "text/plain", "bad axis"); return; }
+    if (!doStep(axis == "pan", dir)) { server.send(409, "text/plain", "limit"); return; }
     server.send(200, "text/plain", "ok");
 }
 
@@ -784,16 +789,15 @@ void handleStop() {
 // delta needed in raw space too. Driving off a fresh reading like this
 // means the result can't inherit any drift accumulated since the last
 // correction, unlike the old dead-reckoned pulse-counting approach.
-void handleGoAzimuth() {
-    if (!homeAzimuthSet) { server.send(409, "text/plain", "home not set"); return; }
-    float t = fmodf(server.arg("target").toFloat(), 360.0f);
+// Shared by the web UI and BLE. Returns the HTTP-style status code; msg is
+// the reply text.
+int doGoAzimuth(float t, const char *&msg) {
+    if (!homeAzimuthSet) { msg = "home not set"; return 409; }
+    t = fmodf(t, 360.0f);
     if (t < 0) t += 360.0f;
 
     float currentRaw;
-    if (!pelco.queryPositionDeg(RS485_ADDRESS, true, currentRaw)) {
-        server.send(504, "text/plain", "no reply");
-        return;
-    }
+    if (!pelco.queryPositionDeg(RS485_ADDRESS, true, currentRaw)) { msg = "no reply"; return 504; }
     rawPanDeg = currentRaw;
     rawPanKnown = true;
 
@@ -810,7 +814,14 @@ void handleGoAzimuth() {
     Serial.printf("Go to Azimut %.1f: azimut now %.1f, raw now %.1f, raw target %.1f%s\n",
                   t, currentAzimuth(), currentRaw, target, clamped ? " (clamped to limit)" : "");
     startGoTo(true, target, GO_SRC_AZIMUTH);
-    server.send(200, "text/plain", clamped ? "ok (limited by pan range)" : "ok");
+    msg = clamped ? "ok (limited by pan range)" : "ok";
+    return 200;
+}
+
+void handleGoAzimuth() {
+    const char *msg;
+    int code = doGoAzimuth(server.arg("target").toFloat(), msg);
+    server.send(code, "text/plain", msg);
 }
 
 // Drives pan straight to its measured center (PAN_MID_TARGET_DEG) - see
@@ -1049,6 +1060,131 @@ void handleStatus() {
     server.send(200, "application/json", buf);
 }
 
+// ---------- Bluetooth LE control (see ble/index.html, Web Bluetooth) ----------
+// The ESP32-S3 only has BLE (no Classic Bluetooth), so the WiFi web page
+// can't be served over it - instead a separate Web Bluetooth page writes
+// short text commands to BLE_CMD_UUID and reads a compact JSON status from
+// BLE_STATUS_UUID. Runs alongside WiFi.
+//
+// Commands (one per write): "step pan 1" / "step tilt -1" (dir: +1 = right/
+// up), "stop", "home", "savehome", "clearhome", "goaz <deg>", "panmid",
+// "tiltzero", "speed <1-63>". The reply text is reported as "res" in the
+// status.
+//
+// BLE callbacks run on the BLE task, not loop() - so onWrite only queues the
+// command, and loop() runs it (pelco/RS485 and all state stay single-threaded).
+BLECharacteristic *bleStatusChar = nullptr;
+portMUX_TYPE bleMux = portMUX_INITIALIZER_UNLOCKED;
+char blePendingCmd[48] = "";
+bool bleCmdPending = false;
+bool bleConnected = false;
+String bleLastResult = "";
+
+class BleCmdCallbacks : public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *c) override {
+        std::string v = c->getValue();
+        portENTER_CRITICAL(&bleMux);
+        strncpy(blePendingCmd, v.c_str(), sizeof(blePendingCmd) - 1);
+        blePendingCmd[sizeof(blePendingCmd) - 1] = '\0';
+        bleCmdPending = true;
+        portEXIT_CRITICAL(&bleMux);
+    }
+};
+
+class BleServerCallbacks : public BLEServerCallbacks {
+    void onConnect(BLEServer *s) override { bleConnected = true; }
+    void onDisconnect(BLEServer *s) override {
+        bleConnected = false;
+        BLEDevice::startAdvertising(); // let the next client connect
+    }
+};
+
+void setupBle() {
+    BLEDevice::init(BLE_DEVICE_NAME);
+    BLEDevice::setPower(BLE_TX_POWER);
+    BLEServer *srv = BLEDevice::createServer();
+    srv->setCallbacks(new BleServerCallbacks());
+    BLEService *svc = srv->createService(BLE_SERVICE_UUID);
+    BLECharacteristic *cmd = svc->createCharacteristic(BLE_CMD_UUID,
+        BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+    cmd->setCallbacks(new BleCmdCallbacks());
+    bleStatusChar = svc->createCharacteristic(BLE_STATUS_UUID, BLECharacteristic::PROPERTY_READ);
+    bleStatusChar->setValue("{}");
+    svc->start();
+    BLEAdvertising *adv = BLEDevice::getAdvertising();
+    adv->addServiceUUID(BLE_SERVICE_UUID);
+    adv->setScanResponse(true);
+    BLEDevice::startAdvertising();
+    Serial.printf("BLE advertising as \"%s\"\n", BLE_DEVICE_NAME);
+}
+
+void handleBleCommand(const char *cmdText) {
+    char cmd[16] = "";
+    char arg1[16] = "";
+    float num = 0;
+    int parsed = sscanf(cmdText, "%15s %15s %f", cmd, arg1, &num);
+    Serial.printf("BLE command: \"%s\"\n", cmdText);
+    String res = "ok";
+
+    if (!strcmp(cmd, "step") && parsed == 3 && (!strcmp(arg1, "pan") || !strcmp(arg1, "tilt"))) {
+        if (!doStep(!strcmp(arg1, "pan"), num >= 0 ? 1 : -1)) res = "limit";
+    } else if (!strcmp(cmd, "stop")) {
+        stopGoTo();
+        pelco.sendStop(RS485_ADDRESS);
+    } else if (!strcmp(cmd, "home")) {
+        doHome();
+    } else if (!strcmp(cmd, "savehome")) {
+        doSaveHome();
+    } else if (!strcmp(cmd, "clearhome")) {
+        doClearHome();
+    } else if (!strcmp(cmd, "goaz") && parsed >= 2) {
+        const char *msg;
+        doGoAzimuth(atof(arg1), msg);
+        res = msg;
+    } else if (!strcmp(cmd, "panmid")) {
+        startGoTo(true, PAN_MID_TARGET_DEG, GO_SRC_PAN_MID);
+    } else if (!strcmp(cmd, "tiltzero")) {
+        startGoTo(false, TILT_ZERO_TARGET_DEG, GO_SRC_TILT_ZERO);
+    } else if (!strcmp(cmd, "speed") && parsed >= 2 && atoi(arg1) >= 1 && atoi(arg1) <= 63) {
+        jogSpeed = (uint8_t)atoi(arg1);
+        prefs.begin("pantilt", false);
+        prefs.putUChar("speed", jogSpeed);
+        prefs.end();
+    } else {
+        res = "unknown command";
+    }
+    bleLastResult = String(cmdText) + ": " + res;
+    bleLastResult.replace("\"", "'"); // keep the status JSON valid
+    bleLastResult.replace("\\", "/");
+}
+
+// Called from loop(): runs a queued command and refreshes the status value.
+void updateBle() {
+    char cmd[sizeof(blePendingCmd)];
+    bool have = false;
+    portENTER_CRITICAL(&bleMux);
+    if (bleCmdPending) {
+        memcpy(cmd, blePendingCmd, sizeof(cmd));
+        bleCmdPending = false;
+        have = true;
+    }
+    portEXIT_CRITICAL(&bleMux);
+    if (have) handleBleCommand(cmd);
+
+    static unsigned long lastStatusMs = 0;
+    if (!bleConnected || millis() - lastStatusMs < 250) return;
+    lastStatusMs = millis();
+    bool azOk = azimuthAvailable();
+    char buf[200];
+    snprintf(buf, sizeof(buf),
+        "{\"az\":%.1f,\"azOk\":%d,\"home\":%d,\"pan\":%.1f,\"tilt\":%.1f,\"pk\":%d,"
+        "\"rp\":%.1f,\"rt\":%.1f,\"drv\":%d,\"spd\":%u,\"res\":\"%s\"}",
+        azOk ? currentAzimuth() : 0.0f, azOk, homeAzimuthSet, panPositionDeg, tiltPositionDeg,
+        positionKnown, rawPanDeg, rawTiltDeg - TILT_ZERO_TARGET_DEG, goToAxis != GO_NONE, jogSpeed,
+        bleLastResult.c_str());
+    bleStatusChar->setValue(buf);
+}
+
 // Confirmation shown on the TFT's status row (below Azimut/Pan/Tilt) for
 // STATUS_MESSAGE_MS after Home/Save Home/Clear Home fires, whether that came
 // from the physical button or the web UI - see doHome()/doSaveHome()/doClearHome().
@@ -1230,6 +1366,7 @@ void setup() {
     positionSyncPending = panRawAtHomeKnown && tiltRawAtHomeKnown;
 
     setupWifi();
+    setupBle();
     drawStaticScreen();
 
     server.on("/", handleRoot);
@@ -1257,6 +1394,7 @@ void loop() {
     updateGoTo();
     refreshRawPosition();
     savePositionWhenSettled();
+    updateBle();
 
     PelcoCommand pelcoCmd;
     if (pelco.poll(pelcoCmd)) {

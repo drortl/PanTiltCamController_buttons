@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pan/Tilt Camera (Bluetooth)</title>
+<!--
+  Web Bluetooth control page for the PanTiltCam controller (see setupBle() /
+  handleBleCommand() in src/main.cpp). Works in Chrome/Edge on Android,
+  Windows, Mac and Linux - not on iPhone (Safari has no Web Bluetooth).
+  Must be opened from https:// or http://localhost (Web Bluetooth needs a
+  secure context). UUIDs must match BLE_*_UUID in include/config.h.
+-->
+<style>
+  * { box-sizing:border-box; }
+  body { font-family: sans-serif; font-size:18px; text-align:center; background:#111; color:#eee; margin:0; padding:16px; overflow-x:hidden; }
+  h2 { margin: 8px 0 16px; }
+  .status { background:#222; border-radius:10px; padding:10px; margin-bottom:20px; display:inline-block; min-width:220px; font-size:24px; }
+  .status div { padding:2px 0; }
+  .pad { display:grid; grid-template-columns: 70px 70px 70px; grid-template-rows: 70px 70px 70px; gap:8px; justify-content:center; margin-bottom:20px; }
+  button { font-size:22px; border:none; border-radius:10px; background:#2d6cdf; color:#fff; touch-action:manipulation; user-select:none; }
+  button:active { background:#1a4fb0; }
+  button:disabled { opacity:0.5; }
+  .b1{grid-column:2;grid-row:1;} .b2{grid-column:1;grid-row:2;} .b3{grid-column:3;grid-row:2;} .b4{grid-column:2;grid-row:3;}
+  .b5{grid-column:2;grid-row:2; font-size:14px; background:#555;}
+  .pad button { background:#c0392b; }
+  #connectBtn { font-size:18px; padding:12px 24px; background:#6b2fa0; margin-bottom:16px; }
+  #conn { font-size:14px; color:#9ab; margin-bottom:12px; min-height:18px; }
+  .row { display:flex; gap:8px; justify-content:center; flex-wrap:wrap; margin-top:12px; }
+  .row button { font-size:16px; padding:10px 16px; }
+  #home { background:#d94f2b; }
+  #saveHome { background:#2b9e4f; }
+  #clearHome { background:#c0392b; }
+  .row input { width:72px; font-size:18px; padding:8px; border-radius:8px; border:none; text-align:center; }
+  .panel { background:#222; border-radius:10px; padding:14px; margin-top:20px; display:inline-block; min-width:260px; }
+  .panel h3 { margin:0 0 10px; font-size:14px; color:#9ab; }
+  .speedRow { display:flex; align-items:center; gap:10px; }
+  .speedRow input[type=range] { flex:1; }
+  #res { font-size:13px; color:#9ab; margin-top:12px; min-height:16px; }
+  #controls.off { opacity:0.4; pointer-events:none; }
+  @media (max-width:600px) {
+    body { padding:10px; }
+    .status, .panel { width:100%; min-width:0; }
+    .pad { grid-template-columns:repeat(3, minmax(54px, 72px)); grid-template-rows:repeat(3, 64px); gap:6px; }
+  }
+</style>
+</head>
+<body>
+<h2>Pan / Tilt Camera (Bluetooth)</h2>
+<button id="connectBtn">Connect</button>
+<div id="conn">Not connected</div>
+
+<div id="controls" class="off">
+  <div class="status">
+    <div>Azimut: <span id="az">--</span> deg<span id="noHome"></span></div>
+    <div>Pan: <span id="pan">--</span> deg</div>
+    <div>Motor Pan: <span id="rawPan">--</span> deg</div>
+    <div>Tilt: <span id="tilt">--</span> deg (0 = horizontal)</div>
+  </div>
+  <div class="pad">
+    <button class="b1" data-cmd="step tilt 1">&#9650;</button>
+    <button class="b2" data-cmd="step pan -1">&#9664;</button>
+    <button class="b5" data-cmd="stop">STOP</button>
+    <button class="b3" data-cmd="step pan 1">&#9654;</button>
+    <button class="b4" data-cmd="step tilt -1">&#9660;</button>
+  </div>
+  <div class="row">
+    <button id="home" data-cmd="home">HOME</button>
+    <button id="saveHome" data-cmd="savehome" data-confirm="Save the current position as Home?">Save Home</button>
+    <button id="clearHome" data-cmd="clearhome" data-confirm="Clear Home?">Clear Home</button>
+  </div>
+  <div class="row">
+    <input type="number" id="targetAz" min="0" max="359" value="0">
+    <button id="goAzBtn">Go to Azimut</button>
+  </div>
+  <div class="row">
+    <button data-cmd="panmid">Pan Mid (175&deg;)</button>
+    <button data-cmd="tiltzero">Tilt Zero (29&deg;)</button>
+  </div>
+  <div class="panel">
+    <h3>JOG SPEED</h3>
+    <div class="speedRow">
+      <input type="range" id="speed" min="1" max="63" value="63">
+      <span id="speedVal">63</span>
+    </div>
+  </div>
+  <div id="res"></div>
+</div>
+
+<script>
+const SERVICE_UUID = '7e1a0001-3c2b-4f5e-9a6d-1b2c3d4e5f60';
+const CMD_UUID     = '7e1a0002-3c2b-4f5e-9a6d-1b2c3d4e5f60';
+const STATUS_UUID  = '7e1a0003-3c2b-4f5e-9a6d-1b2c3d4e5f60';
+
+let device = null, cmdChar = null, statusChar = null, pollTimer = null;
+const enc = new TextEncoder(), dec = new TextDecoder();
+const $ = id => document.getElementById(id);
+
+// Web Bluetooth allows only one GATT operation at a time - chain them all.
+let gattQueue = Promise.resolve();
+function gatt(op) {
+  const p = gattQueue.then(op);
+  gattQueue = p.catch(() => {});
+  return p;
+}
+
+function send(cmd) {
+  if (!cmdChar) return Promise.resolve();
+  return gatt(() => cmdChar.writeValueWithResponse(enc.encode(cmd)))
+    .catch(e => { $('res').textContent = 'Send failed: ' + e.message; });
+}
+
+async function connect() {
+  if (!navigator.bluetooth) {
+    alert('Web Bluetooth is not available. Use Chrome or Edge (not iPhone), opened from https:// or http://localhost.');
+    return;
+  }
+  try {
+    $('conn').textContent = 'Choose "PanTiltCam" in the list...';
+    device = await navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE_UUID] }] });
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+    $('conn').textContent = 'Connecting...';
+    const server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(SERVICE_UUID);
+    cmdChar = await svc.getCharacteristic(CMD_UUID);
+    statusChar = await svc.getCharacteristic(STATUS_UUID);
+    $('conn').textContent = 'Connected to ' + (device.name || 'device');
+    $('connectBtn').textContent = 'Disconnect';
+    $('controls').classList.remove('off');
+    pollTimer = setInterval(poll, 500);
+    poll();
+  } catch (e) {
+    $('conn').textContent = 'Not connected (' + e.message + ')';
+  }
+}
+
+function onDisconnected() {
+  clearInterval(pollTimer);
+  cmdChar = statusChar = null;
+  $('conn').textContent = 'Disconnected';
+  $('connectBtn').textContent = 'Connect';
+  $('controls').classList.add('off');
+}
+
+$('connectBtn').addEventListener('click', () => {
+  if (device && device.gatt.connected) device.gatt.disconnect();
+  else connect();
+});
+
+let pollBusy = false;
+function poll() {
+  if (!statusChar || pollBusy) return;
+  pollBusy = true;
+  gatt(() => statusChar.readValue()).then(v => {
+    const s = JSON.parse(dec.decode(v));
+    if (!('az' in s)) return;
+    $('az').textContent = s.azOk ? s.az.toFixed(1) : '--';
+    $('noHome').textContent = s.home ? '' : ' (no home saved)';
+    $('pan').textContent = s.pk ? s.pan.toFixed(1) : '??';
+    $('rawPan').textContent = s.rp.toFixed(1);
+    $('tilt').textContent = (s.rt >= 0 ? '+' : '') + s.rt.toFixed(1);
+    if (document.activeElement !== $('speed')) { $('speed').value = s.spd; $('speedVal').textContent = s.spd; }
+    $('res').textContent = (s.drv ? 'Driving... ' : '') + (s.res || '');
+  }).catch(() => {}).finally(() => { pollBusy = false; });
+}
+
+document.querySelectorAll('button[data-cmd]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (btn.dataset.confirm && !confirm(btn.dataset.confirm)) return;
+    btn.disabled = true;
+    send(btn.dataset.cmd).finally(() => { btn.disabled = false; });
+  });
+});
+$('goAzBtn').addEventListener('click', () => send('goaz ' + $('targetAz').value));
+$('speed').addEventListener('input', () => { $('speedVal').textContent = $('speed').value; });
+$('speed').addEventListener('change', () => send('speed ' + $('speed').value));
+</script>
+</body>
+</html>
