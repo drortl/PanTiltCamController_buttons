@@ -2,6 +2,9 @@
 
 What changed for the user, newest first.
 
+**Downloads** (Android app and firmware):
+https://github.com/drortl/PanTiltCamController_buttons/releases
+
 ---
 
 ## 2026-10-09 (2)
