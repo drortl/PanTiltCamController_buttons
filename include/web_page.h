@@ -47,16 +47,10 @@ const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
   .presetRow button.save { background:#6b2fa0; }
   .calRow { display:flex; gap:8px; justify-content:center; margin-top:4px; flex-wrap:wrap; }
   .calRow button { font-size:14px; padding:10px 14px; }
-  #autoCalBtn { background:#6b2fa0; }
-  #cancelCalBtn { background:#c0392b; display:none; }
   .gotoBtn.driving { background:#c0392b; }
   .gotoBtn.arrived { background:#2b9e4f; }
-  #calMsg { text-align:center; font-size:13px; color:#9ab; margin-top:8px; min-height:16px; }
   .limitAxis { margin-top:10px; }
   .limitAxis .lbl { font-size:13px; color:#9ab; margin-bottom:4px; }
-  .limitAxis .row { display:flex; gap:6px; align-items:center; }
-  .limitAxis .row span { flex:1; font-size:13px; }
-  .limitAxis .row button { font-size:12px; padding:6px 10px; }
   @media (max-width:600px) {
     body { padding:10px; }
     h2 { font-size:22px; margin:6px 0 12px; }
@@ -115,31 +109,14 @@ const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
 </div>
 
 <div class="panel">
-  <h3>AUTO CALIBRATE</h3>
-  <div class="calRow">
-    <button id="autoCalBtn">Auto Calibrate</button>
-    <button id="cancelCalBtn">Cancel</button>
-  </div>
-  <div id="calMsg">Not calibrated</div>
+  <h3>POSITION TARGETS</h3>
   <div class="calRow">
     <button class="gotoBtn" id="goToPanMidBtn">Pan Mid (175&deg;)</button>
     <button class="gotoBtn" id="goToTiltZeroBtn">Tilt Zero (29&deg;)</button>
   </div>
   <div class="limitAxis">
     <div class="lbl">Pan limits: <span id="panLimits">min -- / max --</span></div>
-    <div class="row">
-      <span></span>
-      <button data-lim-axis="pan" data-which="min">Set Min</button>
-      <button data-lim-axis="pan" data-which="max">Set Max</button>
-    </div>
-  </div>
-  <div class="limitAxis">
     <div class="lbl">Tilt limits: <span id="tiltLimits">min -- / max --</span></div>
-    <div class="row">
-      <span></span>
-      <button data-lim-axis="tilt" data-which="min">Set Min</button>
-      <button data-lim-axis="tilt" data-which="max">Set Max</button>
-    </div>
   </div>
 </div>
 
@@ -182,7 +159,16 @@ goAzimuthBtn.addEventListener('click', () => {
   goAzimuthBtn.classList.remove('arrived');
   goAzimuthBtn.classList.add('driving');
   azDriving = true;
-  fetch(`/goAzimuth?target=${t}`).catch(()=>{});
+  fetch(`/goAzimuth?target=${t}`).then(async r => {
+    const msg = await r.text();
+    if (!r.ok) {
+      azDriving = false;
+      goAzimuthBtn.classList.remove('driving');
+      alert('Go to Azimut failed: ' + msg);
+    } else if (msg !== 'ok') {
+      alert(msg);
+    }
+  }).catch(()=>{});
 });
 
 // Jog speed (Pelco speed byte 0-63, sent with every move/step command -
@@ -231,20 +217,7 @@ presetRows.addEventListener('click', (e) => {
   }
 });
 
-// Auto Calibrate: drives pan then tilt to each mechanical limit (detected
-// by stall) and records the travel range - see updateAutoCalibrate() in
-// main.cpp. Status/limits are read back via /status while it runs.
-const autoCalBtn = document.getElementById('autoCalBtn');
-const cancelCalBtn = document.getElementById('cancelCalBtn');
-const calMsgEl = document.getElementById('calMsg');
-autoCalBtn.addEventListener('click', () => {
-  if (confirm('Auto Calibrate will drive pan and tilt to their mechanical limits. Continue?')) {
-    fetch('/autoCalibrate').catch(()=>{});
-  }
-});
-cancelCalBtn.addEventListener('click', () => fetch('/cancelCalibrate').catch(()=>{}));
-
-// Fixed calibration-target buttons: drive straight to a known raw motor
+// Fixed position-target buttons: drive straight to a known raw motor
 // position (see PAN_MID_TARGET_DEG/TILT_ZERO_TARGET_DEG in config.h). Red
 // while driving, green once /status reports arrival (goToPan/goToTilt).
 let goToPanDriving = false, goToTiltDriving = false;
@@ -263,16 +236,9 @@ goToTiltZeroBtn.addEventListener('click', () => {
   fetch('/goToTiltZero').catch(()=>{});
 });
 
-// Manual limit capture: jog to a mechanical limit with the direction pad,
-// then click Set Min/Max here - an alternative to Auto Calibrate.
-document.querySelectorAll('button[data-lim-axis]').forEach(btn => {
-  btn.addEventListener('click', () => {
-    fetch(`/calLimit?axis=${btn.dataset.limAxis}&which=${btn.dataset.which}`).catch(()=>{});
-  });
-});
-
-function fmtLimits(minOk, min, maxOk, max) {
-  return `min ${minOk ? min.toFixed(1) : '--'} / max ${maxOk ? max.toFixed(1) : '--'}`;
+// Fixed limits from config.h (PAN_LIMIT_*/TILT_LIMIT_*), shown read-only.
+function fmtLimits(min, max) {
+  return `min ${min.toFixed(1)} / max ${max.toFixed(1)}`;
 }
 
 // Tilt is shown relative to TILT_ZERO_TARGET_DEG (horizontal) - explicit
@@ -317,11 +283,8 @@ function poll() {
       speedVal.textContent = s.speed;
     }
 
-    calMsgEl.textContent = s.calMsg;
-    autoCalBtn.style.display = s.calActive ? 'none' : '';
-    cancelCalBtn.style.display = s.calActive ? '' : 'none';
-    document.getElementById('panLimits').textContent = fmtLimits(s.panMinOk, s.panMin, s.panMaxOk, s.panMax);
-    document.getElementById('tiltLimits').textContent = fmtLimits(s.tiltMinOk, s.tiltMin, s.tiltMaxOk, s.tiltMax);
+    document.getElementById('panLimits').textContent = fmtLimits(s.panMin, s.panMax);
+    document.getElementById('tiltLimits').textContent = fmtLimits(s.tiltMin, s.tiltMax);
 
     if (s.presets) {
       s.presets.forEach((p, i) => {

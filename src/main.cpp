@@ -83,7 +83,7 @@ int readButton() {
 bool compassOk = false;
 bool wifiUsingFallbackAP = false;
 String ipStr;
-String wifiLabel; // SSID connected to, or "AP mode" if using the fallback
+String wifiLabel; // SSID connected to, or AP_SSID when hosting the access point
 
 bool homeAzimuthSet = false;
 float homeAzimuth = 0.0f;
@@ -106,6 +106,17 @@ bool positionKnown = false; // true once Home/Save Home establishes a 0/0 refere
 float panRawAtHome = 0.0f, tiltRawAtHome = 0.0f;
 bool panRawAtHomeKnown = false, tiltRawAtHomeKnown = false;
 
+// Set at boot when a raw-at-home reference was restored from flash - the
+// first successful raw query in refreshRawPosition() then rebuilds
+// panPositionDeg/tiltPositionDeg from the head's real position, replacing
+// the last saved (possibly stale) position. Waits for the head to answer,
+// since it may still be powering up after an outage.
+bool positionSyncPending = false;
+
+// Last position written to flash (see savePositionWhenSettled()).
+float savedPanDeg = 0.0f, savedTiltDeg = 0.0f;
+bool savedPositionKnown = false;
+
 // Both axes are back at the saved home position - resets the position
 // reference to 0/0.
 void resetPositionToHome() {
@@ -122,7 +133,7 @@ void resetPositionToHome() {
 // rather than showing a corrupted jump.
 // Motor's own raw reported position (whatever queryPositionDeg() last read),
 // independent of home/positionKnown - shown in the UI as "actual" position
-// so it's useful right after Auto Calibrate, before Home is ever saved.
+// so it's useful before Home is ever saved.
 float rawPanDeg = 0, rawTiltDeg = 0;
 bool rawPanKnown = false, rawTiltKnown = false;
 
@@ -176,23 +187,10 @@ uint32_t stepMsFor(float maxSpeedDegS, float distDeg, uint8_t speed) {
 uint32_t panStepMs() { return stepMsFor(PELCO_MAX_PAN_SPEED_DEG_S, panStepDeg, jogSpeed); }
 uint32_t tiltStepMs() { return stepMsFor(PELCO_MAX_TILT_SPEED_DEG_S, tiltStepDeg, jogSpeed); }
 
-// ---------- Pan/tilt travel limits (from Auto Calibrate or manual capture) ----------
-// Stored as raw head-reported degrees (same frame queryPositionDeg() reads
-// in) - not the home-relative panPositionDeg/tiltPositionDeg - so they can
-// be compared directly against a fresh or estimated raw reading.
-bool panLimitMinKnown = false, panLimitMaxKnown = false;
-bool tiltLimitMinKnown = false, tiltLimitMaxKnown = false;
-float panLimitMinDeg = 0, panLimitMaxDeg = 0;
-float tiltLimitMinDeg = 0, tiltLimitMaxDeg = 0;
-
-void saveLimitsToPrefs() {
-    prefs.begin("pantilt", false);
-    if (panLimitMinKnown) prefs.putFloat("panMin", panLimitMinDeg); else prefs.remove("panMin");
-    if (panLimitMaxKnown) prefs.putFloat("panMax", panLimitMaxDeg); else prefs.remove("panMax");
-    if (tiltLimitMinKnown) prefs.putFloat("tiltMin", tiltLimitMinDeg); else prefs.remove("tiltMin");
-    if (tiltLimitMaxKnown) prefs.putFloat("tiltMax", tiltLimitMaxDeg); else prefs.remove("tiltMax");
-    prefs.end();
-}
+// ---------- Pan/tilt travel limits ----------
+// Fixed in config.h (PAN_LIMIT_*/TILT_LIMIT_*), as raw head-reported
+// degrees - not the home-relative panPositionDeg/tiltPositionDeg - so they
+// can be compared directly against a fresh or estimated raw reading.
 
 // Estimated current raw position, from the home-relative dead-reckoned
 // position plus the raw-at-home reference (same math correctPanDrift()/
@@ -201,7 +199,10 @@ void saveLimitsToPrefs() {
 // home hasn't been saved - limits are only enforced once that exists.
 bool estimatePanRaw(float &raw) {
     if (!panRawAtHomeKnown) return false;
-    raw = panRawAtHome + panPositionDeg;
+    // The head reports pan in [0, 360) but panPositionDeg is cumulative, so
+    // wrap - otherwise e.g. home raw 350 + 20 = 370 reads as past any limit.
+    raw = fmodf(panRawAtHome + panPositionDeg, 360.0f);
+    if (raw < 0) raw += 360.0f;
     return true;
 }
 bool estimateTiltRaw(float &raw) {
@@ -211,144 +212,25 @@ bool estimateTiltRaw(float &raw) {
 }
 
 // dir > 0 = pan right / tilt up, dir < 0 = pan left / tilt down.
+// The *Raw versions check a real raw reading (used by the go-to drive, which
+// has a fresh one); the others check the dead-reckoned estimate.
+bool panAtLimitRaw(float raw, int dir) {
+    if (dir > 0 && raw >= PAN_LIMIT_MAX_DEG) return true;
+    if (dir < 0 && raw <= PAN_LIMIT_MIN_DEG) return true;
+    return false;
+}
+bool tiltAtLimitRaw(float raw, int dir) {
+    if (dir > 0 && raw >= TILT_LIMIT_MAX_DEG) return true;
+    if (dir < 0 && raw <= TILT_LIMIT_MIN_DEG) return true;
+    return false;
+}
 bool panAtLimit(int dir) {
     float raw;
-    if (!estimatePanRaw(raw)) return false;
-    if (dir > 0 && panLimitMaxKnown && raw >= panLimitMaxDeg) return true;
-    if (dir < 0 && panLimitMinKnown && raw <= panLimitMinDeg) return true;
-    return false;
+    return estimatePanRaw(raw) && panAtLimitRaw(raw, dir);
 }
 bool tiltAtLimit(int dir) {
     float raw;
-    if (!estimateTiltRaw(raw)) return false;
-    if (dir > 0 && tiltLimitMaxKnown && raw >= tiltLimitMaxDeg) return true;
-    if (dir < 0 && tiltLimitMinKnown && raw <= tiltLimitMinDeg) return true;
-    return false;
-}
-
-// ---------- Auto Calibrate ----------
-// Non-blocking state machine (ticked from loop(), see updateAutoCalibrate())
-// that scans pan to one limit, pan to the other, tilt to one limit, tilt to
-// the other - each phase detected by real position going flat/stalled
-// rather than any fixed timing. Mirrors TickCalibratePhase() in the sibling
-// USB app's MainForm.cs.
-enum CalPhase { CAL_IDLE, CAL_PAN_MIN, CAL_PAN_MAX, CAL_TILT_MIN, CAL_TILT_MAX };
-CalPhase calPhase = CAL_IDLE;
-unsigned long calWindowStartMs = 0;
-float calWindowStartDeg = 0;
-int calFailCount = 0;
-unsigned long calDeadlineMs = 0;
-String calMessage = "Not calibrated";
-
-// The "positive" scan direction (tiltUp/panRight bit) is assumed to
-// increase the raw reading, but that's never actually verified against the
-// hardware - if it's backward on a given unit, the "min" phase (which
-// drives the OTHER bit) ends up stalling at the numerically larger raw
-// value, leaving min > max. That inversion makes panAtLimit()/tiltAtLimit()
-// block movement almost everywhere, since a raw value can be simultaneously
-// "past max" and "past min". Normalize after each pair completes so min is
-// always <= max regardless of which physical direction produced which
-// value - also re-applied to whatever was last saved to flash, in case a
-// previous calibration was already inverted.
-void normalizeLimits(bool &minKnown, float &minDeg, bool &maxKnown, float &maxDeg) {
-    if (minKnown && maxKnown && minDeg > maxDeg) {
-        float t = minDeg; minDeg = maxDeg; maxDeg = t;
-    }
-}
-
-void sendCalibrateMove(bool pan, bool positive) {
-    bool panLeft = pan && !positive;
-    bool panRight = pan && positive;
-    bool tiltDown = !pan && !positive;
-    bool tiltUp = !pan && positive;
-    pelco.sendMove(RS485_ADDRESS, panLeft, panRight, tiltUp, tiltDown, CAL_SPEED, CAL_SPEED);
-}
-
-void advanceCalPhase(CalPhase next) {
-    calWindowStartMs = 0;
-    calFailCount = 0;
-    calPhase = next;
-    calDeadlineMs = millis() + CAL_PHASE_TIMEOUT_MS;
-    if (next == CAL_PAN_MAX) calMessage = "Calibrating pan...";
-    else if (next == CAL_TILT_MIN) calMessage = "Calibrating tilt...";
-    else if (next == CAL_TILT_MAX) calMessage = "Calibrating tilt...";
-}
-
-void stopGoTo(); // defined below, alongside the rest of Go-to-position
-
-void startAutoCalibrate() {
-    stopGoTo();
-    panLimitMinKnown = panLimitMaxKnown = tiltLimitMinKnown = tiltLimitMaxKnown = false;
-    calWindowStartMs = 0;
-    calFailCount = 0;
-    calPhase = CAL_PAN_MIN;
-    calDeadlineMs = millis() + CAL_PHASE_TIMEOUT_MS;
-    calMessage = "Calibrating pan...";
-}
-
-void tickCalibratePhase(bool pan, bool positive, CalPhase nextPhase) {
-    float deg;
-    bool ok = pelco.queryPositionDeg(RS485_ADDRESS, pan, deg);
-    if (!ok) {
-        calFailCount++;
-        if (calFailCount >= 5) {
-            pelco.sendStop(RS485_ADDRESS);
-            calMessage = String("Calibration failed - no ") + (pan ? "pan" : "tilt") + " reply";
-            calPhase = CAL_IDLE;
-        }
-        return; // transient - keep the current move running, retry next tick
-    }
-    calFailCount = 0;
-    if (pan) { rawPanDeg = deg; rawPanKnown = true; } else { rawTiltDeg = deg; rawTiltKnown = true; }
-
-    if (calWindowStartMs == 0) {
-        calWindowStartMs = millis();
-        calWindowStartDeg = deg;
-        sendCalibrateMove(pan, positive);
-        return;
-    }
-
-    if (millis() - calWindowStartMs >= CAL_STALL_WINDOW_MS) {
-        if (fabs(deg - calWindowStartDeg) < CAL_STALL_EPSILON_DEG) {
-            pelco.sendStop(RS485_ADDRESS);
-            if (pan) {
-                if (!positive) { panLimitMinDeg = deg; panLimitMinKnown = true; } else { panLimitMaxDeg = deg; panLimitMaxKnown = true; }
-                normalizeLimits(panLimitMinKnown, panLimitMinDeg, panLimitMaxKnown, panLimitMaxDeg);
-            } else {
-                if (!positive) { tiltLimitMinDeg = deg; tiltLimitMinKnown = true; } else { tiltLimitMaxDeg = deg; tiltLimitMaxKnown = true; }
-                normalizeLimits(tiltLimitMinKnown, tiltLimitMinDeg, tiltLimitMaxKnown, tiltLimitMaxDeg);
-            }
-            if (nextPhase == CAL_IDLE) {
-                saveLimitsToPrefs();
-                calMessage = "Calibration complete";
-            }
-            advanceCalPhase(nextPhase);
-            return;
-        }
-        calWindowStartMs = millis();
-        calWindowStartDeg = deg;
-    }
-    // Move was already sent once when this phase started, and the head
-    // keeps moving on its own until told to stop - no need to resend every
-    // tick (that just adds RS485 traffic that can collide with the query
-    // reply while the motor's drawing peak current).
-}
-
-void updateAutoCalibrate() {
-    if (calPhase == CAL_IDLE) return;
-    if ((long)(millis() - calDeadlineMs) > 0) {
-        pelco.sendStop(RS485_ADDRESS);
-        calMessage = "Calibration timed out";
-        calPhase = CAL_IDLE;
-        return;
-    }
-    switch (calPhase) {
-        case CAL_PAN_MIN:  tickCalibratePhase(true,  false, CAL_PAN_MAX);  break;
-        case CAL_PAN_MAX:  tickCalibratePhase(true,  true,  CAL_TILT_MIN); break;
-        case CAL_TILT_MIN: tickCalibratePhase(false, false, CAL_TILT_MAX); break;
-        case CAL_TILT_MAX: tickCalibratePhase(false, true,  CAL_IDLE);     break;
-        default: break;
-    }
+    return estimateTiltRaw(raw) && tiltAtLimitRaw(raw, dir);
 }
 
 // Before home is saved: Azimut tracks the live compass reading (for aiming
@@ -380,7 +262,10 @@ float currentAzimuth() {
 // config.h) or, for "Go to Azimut", a raw pan target computed from a fresh
 // query at request time (see handleGoAzimuth()) so it always drives off the
 // head's real current position rather than the dead-reckoned estimate.
-// Non-blocking (pulse, wait, requery) so /status polling can report
+// Far from the target it cruises (one continuous move, polling position
+// while moving - see AUTO_CRUISE_POLL_MS in config.h) so long turns are one
+// smooth motion; near the target it switches to short creep pulses.
+// Non-blocking (pulse/poll, wait, requery) so /status polling can report
 // progress live and the web UI can flip the Go button from red to green on
 // arrival - a single request that blocked until arrival could mean a very
 // long wait for a large turn, with no feedback in the meantime. Only one
@@ -397,6 +282,14 @@ bool goToPulsing = false;
 unsigned long goToPulseUntilMs = 0;
 unsigned long goToDeadlineMs = 0;
 
+// Cruise state (continuous move, see updateGoTo()).
+bool goToCruising = false;
+int goToCruiseDir = 1;           // raw direction being driven (+1 = increase)
+float goToCruiseBestDiff = 0;    // smallest |gap| seen this cruise (wrong-direction check)
+float goToLastRaw = 0;
+unsigned long goToNextPollMs = 0;
+unsigned long goToLastMoveMs = 0;
+
 // Which physical command bit actually increases the raw reading is assumed
 // (panRight/tiltUp = +1), but never verified - if that assumption is
 // backward on a given unit, driving off it would push the head away from
@@ -410,25 +303,143 @@ float goToLastDiff = 0;
 bool goToHasLastDiff = false;
 
 // Periodic refresh of the raw motor position display (rawPanDeg/rawTiltDeg),
-// for when nothing else (a step, calibration, go-to) is already querying
-// it. Skipped while those are active so it doesn't add competing RS485
-// traffic during a steering-critical sequence - see correctPanDrift()/
-// correctTiltDrift() and tickCalibratePhase() for the other updaters.
+// for when nothing else (a step, go-to) is already querying it. Skipped
+// while a go-to runs so it doesn't add competing RS485 traffic during a
+// steering-critical sequence - see correctPanDrift()/correctTiltDrift()
+// and updateGoTo() for the other updaters.
 unsigned long lastRawQueryMs = 0;
 void refreshRawPosition() {
-    if (calPhase != CAL_IDLE || goToAxis != GO_NONE) return;
+    if (goToAxis != GO_NONE) return;
     if (millis() - lastRawQueryMs < 500) return;
     lastRawQueryMs = millis();
     float deg;
     if (pelco.queryPositionDeg(RS485_ADDRESS, true, deg)) { rawPanDeg = deg; rawPanKnown = true; }
     if (pelco.queryPositionDeg(RS485_ADDRESS, false, deg)) { rawTiltDeg = deg; rawTiltKnown = true; }
+
+    if (positionSyncPending && rawPanKnown && rawTiltKnown) {
+        positionSyncPending = false;
+        // Start from the saved position so pan keeps its turn count, then
+        // nudge by the shortest-path error - same math as correctPanDrift().
+        if (!positionKnown) { panPositionDeg = 0.0f; tiltPositionDeg = 0.0f; }
+        float expected = fmodf(panRawAtHome + panPositionDeg, 360.0f);
+        if (expected < 0) expected += 360.0f;
+        panPositionDeg += fmodf(rawPanDeg - expected + 540.0f, 360.0f) - 180.0f;
+        tiltPositionDeg = rawTiltDeg - tiltRawAtHome;
+        positionKnown = true;
+    }
+}
+
+// Writes the current pan/tilt position to flash once it has stopped
+// changing for POSITION_SAVE_DELAY_MS, so it survives a power loss without
+// a flash write on every step. Skipped while a go-to is moving the head.
+#define POSITION_SAVE_DELAY_MS 2000
+float lastSeenPanDeg = 0.0f, lastSeenTiltDeg = 0.0f;
+bool lastSeenPositionKnown = false;
+unsigned long lastPositionChangeMs = 0;
+void savePositionWhenSettled() {
+    if (panPositionDeg != lastSeenPanDeg || tiltPositionDeg != lastSeenTiltDeg ||
+        positionKnown != lastSeenPositionKnown ||
+        goToAxis != GO_NONE) {
+        lastSeenPanDeg = panPositionDeg;
+        lastSeenTiltDeg = tiltPositionDeg;
+        lastSeenPositionKnown = positionKnown;
+        lastPositionChangeMs = millis();
+        return;
+    }
+    if (millis() - lastPositionChangeMs < POSITION_SAVE_DELAY_MS) return;
+    if (positionKnown == savedPositionKnown &&
+        fabsf(panPositionDeg - savedPanDeg) < 0.05f &&
+        fabsf(tiltPositionDeg - savedTiltDeg) < 0.05f) return;
+
+    prefs.begin("pantilt", false);
+    prefs.putBool("posOk", positionKnown);
+    prefs.putFloat("panPos", panPositionDeg);
+    prefs.putFloat("tiltPos", tiltPositionDeg);
+    prefs.end();
+    savedPositionKnown = positionKnown;
+    savedPanDeg = panPositionDeg;
+    savedTiltDeg = tiltPositionDeg;
 }
 
 void stopGoTo() {
-    if (goToPulsing) pelco.sendStop(RS485_ADDRESS);
+    if (goToPulsing || goToCruising) pelco.sendStop(RS485_ADDRESS);
     goToAxis = GO_NONE;
     goSource = GO_SRC_NONE;
     goToPulsing = false;
+    goToCruising = false;
+}
+
+// Sends the continuous move for a cruise in raw direction dir, applying
+// the learned panDirSign/tiltDirSign.
+void sendCruiseMove(bool pan, int dir) {
+    int bitDir = dir * (pan ? panDirSign : tiltDirSign);
+    if (pan) pelco.sendMove(RS485_ADDRESS, bitDir < 0, bitDir > 0, false, false, jogSpeed, jogSpeed);
+    else     pelco.sendMove(RS485_ADDRESS, false, false, bitDir > 0, bitDir < 0, jogSpeed, jogSpeed);
+}
+
+// Distance the head covers in AUTO_BRAKE_LEAD_S at jogSpeed - same speed
+// model as stepMsFor().
+float cruiseBrakeDeg(bool pan) {
+    float frac = jogSpeed / 63.0f;
+    if (frac < 0.08f) frac = 0.08f;
+    float degS = (pan ? PELCO_MAX_PAN_SPEED_DEG_S : PELCO_MAX_TILT_SPEED_DEG_S) * frac;
+    return fmaxf(degS * AUTO_BRAKE_LEAD_S, AUTO_SLOWDOWN_THRESHOLD_DEG);
+}
+
+// Ends a cruise: stop, then let the pulse logic in updateGoTo() finish the
+// approach after AUTO_SETTLE_MS (reuses the pulse wait, so the head's
+// coasting has ended before the next position read).
+void endCruise() {
+    pelco.sendStop(RS485_ADDRESS);
+    goToCruising = false;
+    goToHasLastDiff = false;
+    goToPulsing = true;
+    goToPulseUntilMs = millis() + AUTO_SETTLE_MS;
+}
+
+// One cruise tick: poll position while moving and decide when to stop.
+void updateCruise() {
+    if ((long)(millis() - goToNextPollMs) < 0) return;
+    goToNextPollMs = millis() + AUTO_CRUISE_POLL_MS;
+
+    bool pan = goToAxis == GO_PAN;
+    float raw;
+    if (!pelco.queryPositionDeg(RS485_ADDRESS, pan, raw)) return; // transient - keep moving, deadline/stall guard
+    if (pan) { rawPanDeg = raw; rawPanKnown = true; } else { rawTiltDeg = raw; rawTiltKnown = true; }
+
+    float moved = raw - goToLastRaw;
+    goToLastRaw = raw;
+    if (fabs(moved) > 0.05f) goToLastMoveMs = millis();
+    if (pan) panPositionDeg += moved; else tiltPositionDeg += moved;
+
+    float diff = goToTargetDeg - raw;
+    int dir = goToCruiseDir;
+
+    // Gap grew while still on the start side of the target -> the command
+    // bit is backward for this axis. Flip, remember, and drive the other way.
+    if (diff * dir > 0 && fabs(diff) > goToCruiseBestDiff + 0.5f) {
+        Serial.printf("Go-to cruise: moving away from target (%.1f -> %.1f), flipping %s direction\n",
+                      goToCruiseBestDiff * dir, diff, pan ? "pan" : "tilt");
+        if (pan) panDirSign = -panDirSign; else tiltDirSign = -tiltDirSign;
+        goToCruiseBestDiff = fabs(diff);
+        goToLastMoveMs = millis();
+        sendCruiseMove(pan, dir);
+        return;
+    }
+    if (diff * dir > 0) goToCruiseBestDiff = fminf(goToCruiseBestDiff, fabs(diff));
+
+    bool passed = diff * dir <= 0;
+    bool nearTarget = fabs(diff) <= cruiseBrakeDeg(pan);
+    bool atLimit = pan ? panAtLimitRaw(raw, dir) : tiltAtLimitRaw(raw, dir);
+    bool stalled = millis() - goToLastMoveMs > AUTO_STALL_MS;
+    if (stalled) {
+        // Blocked (e.g. a mechanical stop) - give up rather than retrying
+        // against it until GOTO_DRIVE_TIMEOUT_MS.
+        Serial.printf("Go-to cruise: %s not moving at raw %.1f, giving up\n", pan ? "pan" : "tilt", raw);
+        stopGoTo();
+        return;
+    }
+    if (passed || nearTarget || atLimit) endCruise();
 }
 
 void startGoTo(bool pan, float targetDeg, GoSource source) {
@@ -446,6 +457,13 @@ void updateGoTo() {
         pelco.sendStop(RS485_ADDRESS);
         goToAxis = GO_NONE;
         goSource = GO_SRC_NONE;
+        goToPulsing = false;
+        goToCruising = false;
+        return;
+    }
+
+    if (goToCruising) {
+        updateCruise();
         return;
     }
 
@@ -460,6 +478,9 @@ void updateGoTo() {
     if (!pelco.queryPositionDeg(RS485_ADDRESS, pan, raw)) return; // transient - retry next tick
     if (pan) { rawPanDeg = raw; rawPanKnown = true; } else { rawTiltDeg = raw; rawTiltKnown = true; }
 
+    // No wraparound: the target is always inside the fixed limits (see
+    // handleGoAzimuth()), so driving straight there never crosses the pan
+    // dead zone between PAN_LIMIT_MAX_DEG and PAN_LIMIT_MIN_DEG.
     float diff = goToTargetDeg - raw;
     if (fabs(diff) < AUTO_ARRIVE_TOLERANCE_DEG) {
         goToAxis = GO_NONE; // arrived
@@ -468,11 +489,15 @@ void updateGoTo() {
         return;
     }
 
-    // If the last pulse made the gap to target worse instead of better, the
-    // panRight/tiltUp-increases-raw assumption is backward for this axis on
-    // this unit - flip and remember the correction (see panDirSign/
-    // tiltDirSign above) rather than continuing to drive away from target.
-    if (goToHasLastDiff && fabs(diff) > fabs(goToLastDiff) + 0.3f) {
+    // If the last pulse moved the head AWAY from the target (gap grew, same
+    // side of the target), the panRight/tiltUp-increases-raw assumption is
+    // backward for this axis on this unit - flip and remember the correction
+    // (see panDirSign/tiltDirSign above). An overshoot (gap changed sign)
+    // moved the right way and must not flip - doing so made the drive turn
+    // back and forth around the target.
+    if (goToHasLastDiff && diff * goToLastDiff > 0 && fabs(diff) > fabs(goToLastDiff) + 0.3f) {
+        Serial.printf("Go-to: moved away from target (%.1f -> %.1f), flipping %s direction\n",
+                      goToLastDiff, diff, pan ? "pan" : "tilt");
         if (pan) panDirSign = -panDirSign; else tiltDirSign = -tiltDirSign;
     }
     goToLastDiff = diff;
@@ -484,11 +509,24 @@ void updateGoTo() {
     // firmware (see correctPanDrift()/handleStep()). bitDir: which physical
     // command bit actually achieves that, after applying the learned sign.
     int dir = diff > 0 ? 1 : -1;
-    if ((pan && panAtLimit(dir)) || (!pan && tiltAtLimit(dir))) {
-        goToAxis = GO_NONE; // can't get closer without crossing a calibrated limit
+    if ((pan && panAtLimitRaw(raw, dir)) || (!pan && tiltAtLimitRaw(raw, dir))) {
+        Serial.printf("Go-to stopped at %s limit: raw %.1f, target %.1f\n", pan ? "pan" : "tilt", raw, goToTargetDeg);
+        goToAxis = GO_NONE; // can't get closer without crossing a pan/tilt limit
         goSource = GO_SRC_NONE;
         return;
     }
+    // Far away: one continuous move instead of pulses (see updateCruise()).
+    if (fabs(diff) > cruiseBrakeDeg(pan)) {
+        goToCruising = true;
+        goToCruiseDir = dir;
+        goToCruiseBestDiff = fabs(diff);
+        goToLastRaw = raw;
+        goToLastMoveMs = millis();
+        goToNextPollMs = millis() + AUTO_CRUISE_POLL_MS;
+        sendCruiseMove(pan, dir);
+        return;
+    }
+
     int bitDir = dir * (pan ? panDirSign : tiltDirSign);
 
     // Full-speed, full-length pulses would only ever land within half a
@@ -496,8 +534,14 @@ void updateGoTo() {
     // pulse otherwise) - so slow to a shorter, slower "creep" pulse once
     // close, clamped to the actual remaining distance so the last pulse
     // can't overshoot past the target.
+    // When far away, each pulse covers half the remaining gap (capped at
+    // AUTO_MAX_PULSE_DEG) instead of one jog step - a 2 deg jog step needed
+    // ~170 pulses for a long turn and could hit GOTO_DRIVE_TIMEOUT_MS. Half
+    // the gap also means an error in the assumed head speed can't overshoot
+    // past the target by more than the gap itself.
     bool creeping = fabs(diff) < AUTO_SLOWDOWN_THRESHOLD_DEG;
-    float stepDist = creeping ? fminf(AUTO_CREEP_STEP_DEG, fabs(diff)) : pan ? panStepDeg : tiltStepDeg;
+    float stepDist = creeping ? fminf(AUTO_CREEP_STEP_DEG, fabs(diff))
+                              : fmaxf(fminf(fabs(diff) * 0.5f, AUTO_MAX_PULSE_DEG), AUTO_CREEP_STEP_DEG);
     uint8_t speed = creeping ? AUTO_CREEP_SPEED : jogSpeed;
 
     if (pan) {
@@ -524,7 +568,20 @@ bool connectToWifi(const char *ssid, const char *password, unsigned long timeout
     return WiFi.status() == WL_CONNECTED;
 }
 
+void startAccessPoint() {
+    wifiUsingFallbackAP = true;
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(AP_SSID, AP_PASSWORD);
+    ipStr = WiFi.softAPIP().toString();
+    wifiLabel = AP_SSID;
+    Serial.printf("Access point \"%s\" started, IP: %s\n", AP_SSID, ipStr.c_str());
+}
+
 void setupWifi() {
+#if WIFI_AP_ONLY
+    startAccessPoint();
+    return;
+#endif
     WiFi.mode(WIFI_STA);
     if (connectToWifi(WIFI_SSID_PRIMARY, WIFI_PASSWORD_PRIMARY, WIFI_CONNECT_TIMEOUT_MS)) {
         wifiLabel = WIFI_SSID_PRIMARY;
@@ -532,11 +589,7 @@ void setupWifi() {
         wifiLabel = WIFI_SSID_BACKUP;
     } else {
         Serial.println("Could not join either WiFi network - starting fallback access point");
-        wifiUsingFallbackAP = true;
-        WiFi.mode(WIFI_AP);
-        WiFi.softAP(AP_SSID, AP_PASSWORD);
-        ipStr = WiFi.softAPIP().toString();
-        wifiLabel = "AP mode";
+        startAccessPoint();
         return;
     }
     ipStr = WiFi.localIP().toString();
@@ -623,16 +676,34 @@ void handlePhysicalButton(int button) {
 
 bool homeHeld = false;
 unsigned long homePressStartMs = 0;
-bool homeClearFired = false; // Clear Home already fired for this hold (fires immediately, doesn't wait for release)
+
+// Short-press counter for Clear Home (CLEAR_HOME_PRESS_COUNT presses in a
+// row). Resets when the next press starts more than HOME_MULTI_PRESS_GAP_MS
+// after the last short-press release, or on any long hold.
+uint8_t homeShortPressCount = 0;
+unsigned long homeLastReleaseMs = 0;
 
 // Home (S5) release-time dispatch: total hold duration decides the action.
-// Only reached if Clear Home didn't already fire mid-hold (see
-// updatePhysicalButtons()). Bands are exact and exclusive - a release in the
-// gap between them (e.g. ~3s) intentionally does nothing.
+// Bands are exact and exclusive - a release in the gap between them
+// (e.g. ~3s) intentionally does nothing.
 void dispatchHomeRelease(unsigned long heldMs) {
     if (heldMs <= HOME_MAX_MS) {
-        doHome();
-    } else if (heldMs >= SAVE_HOME_MIN_MS && heldMs <= SAVE_HOME_MAX_MS) {
+        homeShortPressCount++;
+        homeLastReleaseMs = millis();
+        if (homeShortPressCount == 1) {
+            doHome();
+        } else if (homeShortPressCount >= CLEAR_HOME_PRESS_COUNT) {
+            homeShortPressCount = 0;
+            doClearHome();
+        } else {
+            char msg[16];
+            snprintf(msg, sizeof(msg), "CLEAR %d/%d", homeShortPressCount, CLEAR_HOME_PRESS_COUNT);
+            showStatusMessage(msg);
+        }
+        return;
+    }
+    homeShortPressCount = 0;
+    if (heldMs >= SAVE_HOME_MIN_MS && heldMs <= SAVE_HOME_MAX_MS) {
         doSaveHome();
     }
 }
@@ -649,24 +720,20 @@ void updatePhysicalButtons() {
     bool stable = candidateCount >= 4;
     int stableButton = stable ? candidateButton : lastButton;
 
-    // Home (S5) hold tracking - checked every call while held (not just on
-    // the press/release edges) so Clear Home can fire the instant its
-    // threshold is reached, without waiting for the button to be released.
+    // Home (S5) press/release tracking - the action is decided on release
+    // (see dispatchHomeRelease()).
     if (stableButton == 4) {
         if (!homeHeld) {
             homeHeld = true;
             homePressStartMs = millis();
-            homeClearFired = false;
-        } else if (!homeClearFired && millis() - homePressStartMs >= CLEAR_HOME_MIN_MS) {
-            homeClearFired = true;
-            doClearHome();
+            if (millis() - homeLastReleaseMs > HOME_MULTI_PRESS_GAP_MS) {
+                homeShortPressCount = 0; // too slow - start a new sequence
+            }
         }
     } else if (homeHeld) {
         // Home button just released.
         homeHeld = false;
-        if (!homeClearFired) {
-            dispatchHomeRelease(millis() - homePressStartMs);
-        }
+        dispatchHomeRelease(millis() - homePressStartMs);
     }
 
     if (stableButton == lastButton) return;
@@ -732,11 +799,21 @@ void handleGoAzimuth() {
 
     // Shortest signed distance from the current Azimut to the target, in (-180, 180].
     float diff = fmodf(t - currentAzimuth() + 540.0f, 360.0f) - 180.0f;
-    startGoTo(true, currentRaw + diff, GO_SRC_AZIMUTH);
-    server.send(200, "text/plain", "ok");
+    // Raw target in the head's own [0, 360) frame.
+    float target = fmodf(currentRaw + diff, 360.0f);
+    if (target < 0) target += 360.0f;
+    // The head can't pass the dead zone between the limits - clamp so the
+    // drive goes as far as it can instead of stopping.
+    bool clamped = false;
+    if (target < PAN_LIMIT_MIN_DEG) { target = PAN_LIMIT_MIN_DEG; clamped = true; }
+    if (target > PAN_LIMIT_MAX_DEG) { target = PAN_LIMIT_MAX_DEG; clamped = true; }
+    Serial.printf("Go to Azimut %.1f: azimut now %.1f, raw now %.1f, raw target %.1f%s\n",
+                  t, currentAzimuth(), currentRaw, target, clamped ? " (clamped to limit)" : "");
+    startGoTo(true, target, GO_SRC_AZIMUTH);
+    server.send(200, "text/plain", clamped ? "ok (limited by pan range)" : "ok");
 }
 
-// Drives pan straight to its calibrated center (PAN_MID_TARGET_DEG) - see
+// Drives pan straight to its measured center (PAN_MID_TARGET_DEG) - see
 // updateGoTo() in loop().
 void handleGoToPanMid() {
     startGoTo(true, PAN_MID_TARGET_DEG, GO_SRC_PAN_MID);
@@ -776,6 +853,12 @@ void doSaveHome() {
     if (panRawAtHomeKnown) panRawAtHome = raw;
     tiltRawAtHomeKnown = pelco.queryPositionDeg(RS485_ADDRESS, false, raw);
     if (tiltRawAtHomeKnown) tiltRawAtHome = raw;
+    positionSyncPending = false;
+
+    prefs.begin("pantilt", false);
+    if (panRawAtHomeKnown) prefs.putFloat("panRaw0", panRawAtHome); else prefs.remove("panRaw0");
+    if (tiltRawAtHomeKnown) prefs.putFloat("tiltRaw0", tiltRawAtHome); else prefs.remove("tiltRaw0");
+    prefs.end();
 
     int16_t cx, cy, cz;
     if (compassOk && compass.read(cx, cy, cz)) {
@@ -797,6 +880,8 @@ void doClearHome() {
     homeAzimuth = 0.0f;
     prefs.begin("pantilt", false);
     prefs.remove("homeAz");
+    prefs.remove("panRaw0");
+    prefs.remove("tiltRaw0");
     prefs.end();
 
     positionKnown = false;
@@ -804,6 +889,7 @@ void doClearHome() {
     tiltPositionDeg = 0.0f;
     panRawAtHomeKnown = false;
     tiltRawAtHomeKnown = false;
+    positionSyncPending = false;
     showStatusMessage("CLEAR HOME");
 }
 
@@ -921,37 +1007,6 @@ void handleSetSteps() {
     server.send(200, "text/plain", "ok");
 }
 
-void handleAutoCalibrate() {
-    startAutoCalibrate();
-    server.send(200, "text/plain", "ok");
-}
-
-void handleCancelCalibrate() {
-    if (calPhase != CAL_IDLE) {
-        pelco.sendStop(RS485_ADDRESS);
-        calPhase = CAL_IDLE;
-        calMessage = "Cancelled";
-    }
-    server.send(200, "text/plain", "ok");
-}
-
-// Manual alternative to Auto Calibrate: jog to a mechanical limit with the
-// direction buttons, then capture it here - useful if the automatic stall
-// scan isn't reliable for a given axis.
-void handleCalLimit() {
-    bool pan = server.arg("axis") == "pan";
-    bool isMin = server.arg("which") == "min";
-    float raw;
-    if (!pelco.queryPositionDeg(RS485_ADDRESS, pan, raw)) {
-        server.send(504, "text/plain", "no reply");
-        return;
-    }
-    if (pan) { if (isMin) { panLimitMinDeg = raw; panLimitMinKnown = true; } else { panLimitMaxDeg = raw; panLimitMaxKnown = true; } }
-    else { if (isMin) { tiltLimitMinDeg = raw; tiltLimitMinKnown = true; } else { tiltLimitMaxDeg = raw; tiltLimitMaxKnown = true; } }
-    saveLimitsToPrefs();
-    server.send(200, "text/plain", "ok");
-}
-
 void handleStatus() {
     bool azOk = azimuthAvailable();
     float heading = azOk ? currentAzimuth() : 0.0f;
@@ -964,9 +1019,7 @@ void handleStatus() {
         "\"tiltRelOk\":%s,\"tiltRel\":%.1f,"
         "\"speed\":%u,"
         "\"panStep\":%.1f,\"tiltStep\":%.1f,"
-        "\"calActive\":%s,\"calMsg\":\"%s\","
-        "\"panMinOk\":%s,\"panMin\":%.1f,\"panMaxOk\":%s,\"panMax\":%.1f,"
-        "\"tiltMinOk\":%s,\"tiltMin\":%.1f,\"tiltMaxOk\":%s,\"tiltMax\":%.1f,"
+        "\"panMin\":%.1f,\"panMax\":%.1f,\"tiltMin\":%.1f,\"tiltMax\":%.1f,"
         "\"goToPan\":%s,\"goToTilt\":%s,"
         "\"presets\":[",
         heading, azOk ? "true" : "false", homeAzimuthSet ? "true" : "false",
@@ -976,11 +1029,7 @@ void handleStatus() {
         rawTiltKnown ? "true" : "false", rawTiltDeg - TILT_ZERO_TARGET_DEG,
         jogSpeed,
         panStepDeg, tiltStepDeg,
-        calPhase != CAL_IDLE ? "true" : "false", calMessage.c_str(),
-        panLimitMinKnown ? "true" : "false", panLimitMinDeg,
-        panLimitMaxKnown ? "true" : "false", panLimitMaxDeg,
-        tiltLimitMinKnown ? "true" : "false", tiltLimitMinDeg,
-        tiltLimitMaxKnown ? "true" : "false", tiltLimitMaxDeg,
+        PAN_LIMIT_MIN_DEG, PAN_LIMIT_MAX_DEG, TILT_LIMIT_MIN_DEG, TILT_LIMIT_MAX_DEG,
         (goToAxis == GO_PAN && goSource == GO_SRC_PAN_MID) ? "true" : "false",
         (goToAxis == GO_TILT && goSource == GO_SRC_TILT_ZERO) ? "true" : "false");
     if (n < 0) n = 0;
@@ -1037,10 +1086,8 @@ void updateDisplay() {
 
     // While the Home button is held past HOME_MAX_MS, show a live "HOLD Ns"
     // counter so the user can see how long they've held it (helps them land
-    // in the Save Home window / reach Clear Home). Once Clear Home has fired
-    // for this hold, its confirmation message takes over immediately instead
-    // (see doClearHome()/updatePhysicalButtons()) rather than waiting on release.
-    bool holdCountdownActive = homeHeld && !homeClearFired && (millis() - homePressStartMs) > HOME_MAX_MS;
+    // in the Save Home window).
+    bool holdCountdownActive = homeHeld && (millis() - homePressStartMs) > HOME_MAX_MS;
     unsigned long holdSec = holdCountdownActive ? (millis() - homePressStartMs) / 1000 : 0;
 
     bool statusActive = statusMessage.length() > 0 && (long)(millis() - statusMessageUntilMs) < 0;
@@ -1159,14 +1206,6 @@ void setup() {
     jogSpeed = prefs.getUChar("speed", PELCO_STEP_SPEED);
     panStepDeg = prefs.getFloat("panStep", DEFAULT_PAN_STEP_DEG);
     tiltStepDeg = prefs.getFloat("tiltStep", DEFAULT_TILT_STEP_DEG);
-    panLimitMinKnown = prefs.isKey("panMin");  panLimitMinDeg  = prefs.getFloat("panMin", 0.0f);
-    panLimitMaxKnown = prefs.isKey("panMax");  panLimitMaxDeg  = prefs.getFloat("panMax", 0.0f);
-    tiltLimitMinKnown = prefs.isKey("tiltMin"); tiltLimitMinDeg = prefs.getFloat("tiltMin", 0.0f);
-    tiltLimitMaxKnown = prefs.isKey("tiltMax"); tiltLimitMaxDeg = prefs.getFloat("tiltMax", 0.0f);
-    // Fixes up a previously-saved inverted pair (min > max) from before
-    // normalizeLimits() existed - see its comment for why that can happen.
-    normalizeLimits(panLimitMinKnown, panLimitMinDeg, panLimitMaxKnown, panLimitMaxDeg);
-    normalizeLimits(tiltLimitMinKnown, tiltLimitMinDeg, tiltLimitMaxKnown, tiltLimitMaxDeg);
     for (int i = 0; i < PELCO_USER_PRESET_COUNT; i++) {
         char keyAz[8], keyTilt[8];
         snprintf(keyAz, sizeof(keyAz), "pAz%d", i);
@@ -1176,7 +1215,19 @@ void setup() {
         presetTiltKnown[i] = prefs.isKey(keyTilt);
         presetTilt[i] = prefs.getFloat(keyTilt, 0.0f);
     }
+    // Restore the last position from before power was lost. If the
+    // raw-at-home reference is also saved, refreshRawPosition() corrects it
+    // from the head's real position as soon as the head answers.
+    panRawAtHomeKnown = prefs.isKey("panRaw0");   panRawAtHome  = prefs.getFloat("panRaw0", 0.0f);
+    tiltRawAtHomeKnown = prefs.isKey("tiltRaw0"); tiltRawAtHome = prefs.getFloat("tiltRaw0", 0.0f);
+    positionKnown = prefs.getBool("posOk", false);
+    panPositionDeg = prefs.getFloat("panPos", 0.0f);
+    tiltPositionDeg = prefs.getFloat("tiltPos", 0.0f);
     prefs.end();
+    savedPositionKnown = lastSeenPositionKnown = positionKnown;
+    savedPanDeg = lastSeenPanDeg = panPositionDeg;
+    savedTiltDeg = lastSeenTiltDeg = tiltPositionDeg;
+    positionSyncPending = panRawAtHomeKnown && tiltRawAtHomeKnown;
 
     setupWifi();
     drawStaticScreen();
@@ -1194,9 +1245,6 @@ void setup() {
     server.on("/presetGo", handlePresetGo);
     server.on("/setSpeed", handleSetSpeed);
         server.on("/setSteps", handleSetSteps);
-    server.on("/autoCalibrate", handleAutoCalibrate);
-    server.on("/cancelCalibrate", handleCancelCalibrate);
-    server.on("/calLimit", handleCalLimit);
     server.on("/status", handleStatus);
     server.begin();
 }
@@ -1207,8 +1255,8 @@ void loop() {
     updatePhysicalButtons();
     maintainWifi();
     updateGoTo();
-    updateAutoCalibrate();
     refreshRawPosition();
+    savePositionWhenSettled();
 
     PelcoCommand pelcoCmd;
     if (pelco.poll(pelcoCmd)) {

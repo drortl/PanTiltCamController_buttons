@@ -41,10 +41,13 @@
 // drive any local motors.
 // ============================================================================
 
-// ---------- WiFi (joins an existing network) ----------
-// Tries the primary network first, then the backup, at boot. If neither is
-// reachable, falls back to hosting its own access point (AP_SSID/AP_PASSWORD)
-// so the device is never completely unreachable.
+// ---------- WiFi ----------
+// WIFI_AP_ONLY 1: the device always hosts its own access point
+// (AP_SSID/AP_PASSWORD), web UI at http://192.168.4.1 - no router needed.
+// WIFI_AP_ONLY 0: tries the primary network first, then the backup, at
+// boot. If neither is reachable, falls back to the access point above so
+// the device is never completely unreachable.
+#define WIFI_AP_ONLY 1
 // Actual credentials live in secrets.h (gitignored, not committed) - copy
 // secrets.h.example to secrets.h and fill in your real network details.
 #include "secrets.h"
@@ -117,34 +120,23 @@ static const uint8_t BUTTON_CLASS_TO_SWITCH[BUTTON_THRESHOLD_COUNT] = {
 
 #define PELCO_HOME_PRESET 1     // preset number the pan-tilt head calls on "HOME"
 
-// Home button (S5) is overloaded by hold duration:
-//   released within HOME_MAX_MS                            -> Home
+// Home button (S5) actions:
+//   short press (released within HOME_MAX_MS)               -> Home
+//   CLEAR_HOME_PRESS_COUNT short presses in a row, each
+//     starting within HOME_MULTI_PRESS_GAP_MS of the last
+//     release                                                -> Clear Home
+//     (the 1st press still runs Home; presses 2..N-1 only count)
 //   released within [SAVE_HOME_MIN_MS, SAVE_HOME_MAX_MS]    -> Save Home
-//   held past CLEAR_HOME_MIN_MS                             -> Clear Home,
-//     fires immediately at that instant (button still held) so it can't be
-//     missed by overshooting or under-releasing; further holding/release
-//     after that does nothing more
-//   released in the gap between Home and Save Home (e.g. ~3s) -> nothing
-//     (buffer zone against mis-timed releases, not meant to be relied on)
+//   released in the gap between Home and Save Home (e.g. ~3s), or after
+//     SAVE_HOME_MAX_MS -> nothing (buffer zone against mis-timed releases)
 // Home/Save Home bands are deliberately wide - a human has no on-screen
 // countdown while holding, so a 1-2s target window (the original design)
 // was unhittable in practice.
-#define HOME_MAX_MS        2000
-#define SAVE_HOME_MIN_MS   4000
-#define SAVE_HOME_MAX_MS   15000
-#define CLEAR_HOME_MIN_MS  25000
-
-// How long the "HOME" / "SAVE HOME" / "CLEAR HOME" confirmation stays on
-// the TFT's status row (triggered by button or web UI).
-#define STATUS_MESSAGE_MS 5000
-
-// Home button (S5) is overloaded by hold duration: a short press (released
-// before HOME_HOLD_SAVE_MS) calls Home; holding to HOME_HOLD_SAVE_MS fires
-// Save Home; holding on to HOME_HOLD_CLEAR_MS fires Clear Home instead (Save
-// Home does not also fire). Each fires once, immediately at its threshold,
-// while the button is still held - see updatePhysicalButtons() in main.cpp.
-#define HOME_HOLD_SAVE_MS  5000
-#define HOME_HOLD_CLEAR_MS 30000
+#define HOME_MAX_MS             2000
+#define SAVE_HOME_MIN_MS        4000
+#define SAVE_HOME_MAX_MS        15000
+#define CLEAR_HOME_PRESS_COUNT  5
+#define HOME_MULTI_PRESS_GAP_MS 1000
 
 // How long a "HOME" / "SAVE HOME" / "CLEAR HOME" confirmation stays on the
 // TFT's status row after being triggered (by button or web UI).
@@ -182,19 +174,31 @@ static const uint8_t BUTTON_CLASS_TO_SWITCH[BUTTON_THRESHOLD_COUNT] = {
 #define AUTO_SLOWDOWN_THRESHOLD_DEG 3.0f
 #define AUTO_CREEP_STEP_DEG         1.0f
 #define AUTO_CREEP_SPEED            10     // slow speed byte (0-63) for the final approach
+#define AUTO_MAX_PULSE_DEG          30.0f  // longest single go-to pulse when far from the target
 
-// ---------- Auto Calibration (pan/tilt travel limits) ----------
-// Drives each axis to its mechanical end and detects arrival by the head's
-// real reported position going flat/stalled, then repeats for the opposite
-// end and the other axis - same approach as the sibling PanTiltRS485Controller
-// USB app's Auto Calibrate (see MainForm.cs there). Limits are stored as raw
-// head-reported degrees and persisted to flash.
-#define CAL_SPEED               63     // full speed for the calibration scan
-#define CAL_STALL_WINDOW_MS     900    // must be flat for this long to count as arrived
-#define CAL_STALL_EPSILON_DEG   0.6f
-#define CAL_PHASE_TIMEOUT_MS    100000 // safety backstop per phase (tilt is slow)
+// Far from the target, the go-to drive "cruises": one continuous move at
+// jogSpeed, polling the position every AUTO_CRUISE_POLL_MS, and stops when
+// the remaining distance is under the braking distance - the distance the
+// head covers in AUTO_BRAKE_LEAD_S at the current speed (never less than
+// AUTO_SLOWDOWN_THRESHOLD_DEG). The short creep pulses above then finish
+// the approach. Raise AUTO_BRAKE_LEAD_S if it overshoots, lower it if the
+// final creep takes too long.
+#define AUTO_CRUISE_POLL_MS         100
+#define AUTO_BRAKE_LEAD_S           0.4f
+#define AUTO_SETTLE_MS              300    // wait after stopping a cruise before re-reading position
+#define AUTO_STALL_MS               1500   // no movement this long while cruising -> stop
 
-// Fixed calibration-target buttons in the web UI: drive straight to a known
+// ---------- Pan/tilt travel limits (fixed) ----------
+// Mechanical range of this head, in raw head-reported degrees (same frame
+// queryPositionDeg() reads in). Measured once with the old Auto Calibrate -
+// fixed for this unit. Pan can't pass the 350-360/0 dead zone, so Go to
+// Azimut takes the long way round when the short way would cross it.
+#define PAN_LIMIT_MIN_DEG       0.0f
+#define PAN_LIMIT_MAX_DEG       350.0f
+#define TILT_LIMIT_MIN_DEG      0.0f
+#define TILT_LIMIT_MAX_DEG      50.0f
+
+// Fixed position-target buttons in the web UI: drive straight to a known
 // raw motor position (same frame queryPositionDeg() reads in) rather than
 // scanning to a mechanical limit. Measured on this unit - pan center is
 // 175 deg, tilt level/horizontal (zero) is 29 deg - re-measure and adjust
