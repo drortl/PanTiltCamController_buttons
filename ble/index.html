@@ -117,7 +117,12 @@ async function connect() {
   }
   try {
     $('conn').textContent = 'Choose "PanTiltCam" in the list...';
-    device = await navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE_UUID] }] });
+    // Match by service UUID or by name - some phones miss the 128-bit UUID in
+    // the advertising data and would show an empty list otherwise.
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [SERVICE_UUID] }, { namePrefix: 'PanTiltCam' }],
+      optionalServices: [SERVICE_UUID]
+    });
     device.addEventListener('gattserverdisconnected', onDisconnected);
     $('conn').textContent = 'Connecting...';
     const server = await device.gatt.connect();
