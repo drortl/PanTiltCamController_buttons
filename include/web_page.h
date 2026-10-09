@@ -49,6 +49,23 @@ const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
   .calRow button { font-size:14px; padding:10px 14px; }
   .gotoBtn.driving { background:#c0392b; }
   .gotoBtn.arrived { background:#2b9e4f; }
+  .header { display:flex; align-items:center; justify-content:space-between; max-width:420px; margin:0 auto 8px; }
+  .header h2 { margin:8px 0; }
+  .iconBtn { width:44px; height:44px; font-size:24px; background:#333; border-radius:10px; padding:0; display:inline-block; }
+  span.iconBtn { background:none; }
+  [hidden] { display:none !important; }
+  .wifiRow { display:flex; align-items:center; justify-content:center; gap:12px; }
+  .switch { position:relative; display:inline-block; width:56px; height:30px; }
+  .switch input { opacity:0; width:0; height:0; }
+  .slider { position:absolute; inset:0; background:#2b9e4f; border-radius:30px; transition:.2s; cursor:pointer; }
+  .slider:before { content:""; position:absolute; width:24px; height:24px; left:3px; top:3px; background:#fff; border-radius:50%; transition:.2s; }
+  .switch input:checked + .slider { background:#2d6cdf; }
+  .switch input:checked + .slider:before { transform:translateX(26px); }
+  #wifiNote { font-size:12px; color:#9ab; margin-top:8px; text-align:center; }
+  .wifiCfg { margin-top:12px; border-top:1px solid #333; padding-top:10px; }
+  .wifiCfg .lbl { font-size:13px; color:#9ab; margin-bottom:6px; }
+  .wifiCfg input { width:100%; font-size:16px; padding:8px; border-radius:6px; border:none; margin-bottom:6px; }
+  .wifiCfg button { font-size:14px; padding:8px 14px; width:100%; }
   .limitAxis { margin-top:10px; }
   .limitAxis .lbl { font-size:13px; color:#9ab; margin-bottom:4px; }
   @media (max-width:600px) {
@@ -68,7 +85,8 @@ const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
 </style>
 </head>
 <body>
-<h2>Pan / Tilt Camera</h2>
+<div id="mainScreen">
+<div class="header"><h2>Pan / Tilt Camera</h2><button id="openSettings" class="iconBtn" title="Settings">&#9881;</button></div>
 <div class="status">
   <div>Azimut: <span id="heading">--</span> deg<span id="noHome"></span></div>
   <div>Pan: <span id="pan">--</span> deg</div>
@@ -88,6 +106,28 @@ const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
 </div>
 
 <div class="panel">
+  <h3>POSITION PRESETS</h3>
+  <div id="presetRows"></div>
+</div>
+
+<div class="panel">
+  <h3>POSITION TARGETS</h3>
+  <div class="calRow">
+    <button class="gotoBtn" id="goToPanMidBtn">Pan Mid (175&deg;)</button>
+    <button class="gotoBtn" id="goToTiltZeroBtn">Tilt Zero (29&deg;)</button>
+  </div>
+  <div class="limitAxis">
+    <div class="lbl">Pan limits: <span id="panLimits">min -- / max --</span></div>
+    <div class="lbl">Tilt limits: <span id="tiltLimits">min -- / max --</span></div>
+  </div>
+</div>
+
+</div>
+
+<div id="settingsScreen" hidden>
+<div class="header"><button id="closeSettings" class="iconBtn" title="Back">&#8592;</button><h2>Settings</h2><span class="iconBtn"></span></div>
+
+<div class="panel">
   <h3>JOG SPEED</h3>
   <div class="speedRow">
     <input type="range" id="speedSlider" min="1" max="63" value="63">
@@ -104,20 +144,27 @@ const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
 </div>
 
 <div class="panel">
-  <h3>POSITION PRESETS</h3>
-  <div id="presetRows"></div>
+  <h3>WIFI MODE</h3>
+  <div class="wifiRow">
+    <span>Access point</span>
+    <label class="switch"><input type="checkbox" id="wifiSwitch"><span class="slider"></span></label>
+    <span>Home WiFi</span>
+  </div>
+  <div id="wifiNote"></div>
+  <div class="wifiCfg">
+    <div class="lbl">Home WiFi network</div>
+    <input type="text" id="staSsid" placeholder="Network name (SSID)" maxlength="32" autocomplete="off">
+    <input type="password" id="staPass" placeholder="Password (empty = keep current)" maxlength="63" autocomplete="new-password">
+    <button id="saveSta">Save home WiFi</button>
+  </div>
+  <div class="wifiCfg">
+    <div class="lbl">Access point</div>
+    <input type="text" id="apSsid" placeholder="Access point name" maxlength="32" autocomplete="off">
+    <input type="password" id="apPass" placeholder="Password, 8+ chars (empty = keep current)" maxlength="63" autocomplete="new-password">
+    <button id="saveAp">Save access point</button>
+  </div>
 </div>
 
-<div class="panel">
-  <h3>POSITION TARGETS</h3>
-  <div class="calRow">
-    <button class="gotoBtn" id="goToPanMidBtn">Pan Mid (175&deg;)</button>
-    <button class="gotoBtn" id="goToTiltZeroBtn">Tilt Zero (29&deg;)</button>
-  </div>
-  <div class="limitAxis">
-    <div class="lbl">Pan limits: <span id="panLimits">min -- / max --</span></div>
-    <div class="lbl">Tilt limits: <span id="tiltLimits">min -- / max --</span></div>
-  </div>
 </div>
 
 <script>
@@ -148,6 +195,66 @@ document.getElementById('clearHome').addEventListener('click', () => {
     fetch('/clearHome').catch(()=>{});
   }
 });
+
+// Two screens in one page: main controls and Settings. The URL hash
+// (#settings) tracks which one is shown, so the phone's Back button
+// returns from Settings to the main screen.
+function showScreen() {
+  const settings = location.hash === '#settings';
+  document.getElementById('mainScreen').hidden = settings;
+  document.getElementById('settingsScreen').hidden = !settings;
+  window.scrollTo(0, 0);
+}
+document.getElementById('openSettings').addEventListener('click', () => { location.hash = 'settings'; });
+document.getElementById('closeSettings').addEventListener('click', () => {
+  if (location.hash === '#settings') history.back(); else showScreen();
+});
+window.addEventListener('hashchange', showScreen);
+showScreen();
+
+// WiFi mode switch: off = access point, on = home WiFi. The device saves
+// the choice and restarts, so this page loses its connection - reconnect
+// on the new network (see the note text for where to find it).
+const wifiSwitch = document.getElementById('wifiSwitch');
+const wifiNote = document.getElementById('wifiNote');
+let wifiSwitching = false;
+let apName = 'PanTiltCam-Setup'; // updated from /status
+wifiSwitch.addEventListener('change', () => {
+  const toHome = wifiSwitch.checked;
+  const msg = toHome
+    ? 'Switch to Home WiFi? The device restarts and joins your home network. ' +
+      'Connect your phone to the home network and open the new IP shown on the device screen. ' +
+      'If the home network is not found, the access point starts again.'
+    : `Switch to Access point? The device restarts. Connect to WiFi "${apName}" ` +
+      'and open http://192.168.4.1';
+  if (!confirm(msg)) { wifiSwitch.checked = !toHome; return; }
+  wifiSwitching = true;
+  wifiSwitch.disabled = true;
+  wifiNote.textContent = 'Restarting...';
+  fetch(`/setWifiMode?mode=${toHome ? 'sta' : 'ap'}`).catch(()=>{});
+});
+
+// WiFi settings: sent as a POST form so the password is not in the URL.
+// Empty password = keep the saved one. The device restarts to apply them.
+let wifiFieldsLoaded = false;
+function saveWifiConfig(kind) {
+  const ssid = document.getElementById(kind + 'Ssid').value.trim();
+  const pass = document.getElementById(kind + 'Pass').value;
+  if (!ssid) { alert('Enter a network name.'); return; }
+  if (pass && pass.length < 8) { alert('Password must be at least 8 characters.'); return; }
+  const what = kind === 'sta' ? 'home WiFi' : 'access point';
+  if (!confirm(`Save ${what} settings? The device restarts to apply them.`)) return;
+  fetch('/setWifiConfig', { method: 'POST', body: new URLSearchParams({ kind, ssid, pass }) })
+    .then(async r => {
+      const t = await r.text();
+      if (!r.ok) { alert('Not saved: ' + t); return; }
+      document.getElementById(kind + 'Pass').value = '';
+      wifiSwitching = true;
+      wifiNote.textContent = 'Saved - restarting...';
+    }).catch(() => {});
+}
+document.getElementById('saveSta').addEventListener('click', () => saveWifiConfig('sta'));
+document.getElementById('saveAp').addEventListener('click', () => saveWifiConfig('ap'));
 
 // Red while the head is auto-driving toward the target, green once
 // /status reports it arrived (see autoDrive in the JSON, driven by
@@ -285,6 +392,20 @@ function poll() {
 
     document.getElementById('panLimits').textContent = fmtLimits(s.panMin, s.panMax);
     document.getElementById('tiltLimits').textContent = fmtLimits(s.tiltMin, s.tiltMax);
+
+    if (s.apSsid !== undefined) apName = s.apSsid;
+    if (!wifiSwitching) {
+      wifiSwitch.checked = !s.apMode;
+      wifiNote.textContent = s.wifiFallback
+        ? `Home WiFi "${s.staSsid}" not found - running as access point`
+        : (s.apMode ? `Hosting "${s.apSsid}"` : `Connected to "${s.staSsid}"`);
+    }
+    // Fill the name fields once - after that, don't overwrite what the user types.
+    if (!wifiFieldsLoaded && s.staSsid !== undefined) {
+      document.getElementById('staSsid').value = s.staSsid;
+      document.getElementById('apSsid').value = s.apSsid;
+      wifiFieldsLoaded = true;
+    }
 
     if (s.presets) {
       s.presets.forEach((p, i) => {

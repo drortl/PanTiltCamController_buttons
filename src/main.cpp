@@ -570,24 +570,62 @@ bool connectToWifi(const char *ssid, const char *password, unsigned long timeout
     return WiFi.status() == WL_CONNECTED;
 }
 
+// WiFi settings, editable from the web UI and BLE and saved in flash
+// ("staSsid"/"staPass"/"apSsid"/"apPass"); secrets.h / config.h only give
+// the defaults. Passwords are never sent back to a client.
+String staSsid = WIFI_SSID_PRIMARY, staPass = WIFI_PASSWORD_PRIMARY;
+String apSsid = AP_SSID, apPass = AP_PASSWORD;
+
+// WiFi on/off (BLE only - "wifi on" / "wifi off"), saved in flash
+// ("wifiOn"). Off = radio off, control over Bluetooth only.
+bool wifiEnabled = true;
+
+String jsonEscape(const String &s) {
+    String out;
+    for (size_t i = 0; i < s.length(); i++) {
+        char c = s[i];
+        if (c == '"' || c == '\\') { out += '\\'; out += c; }
+        else if ((uint8_t)c < 0x20) out += ' ';
+        else out += c;
+    }
+    return out;
+}
+
 void startAccessPoint() {
     wifiUsingFallbackAP = true;
     WiFi.mode(WIFI_AP);
-    WiFi.softAP(AP_SSID, AP_PASSWORD);
+    WiFi.softAP(apSsid.c_str(), apPass.c_str());
     ipStr = WiFi.softAPIP().toString();
-    wifiLabel = AP_SSID;
-    Serial.printf("Access point \"%s\" started, IP: %s\n", AP_SSID, ipStr.c_str());
+    wifiLabel = apSsid;
+    Serial.printf("Access point \"%s\" started, IP: %s\n", apSsid.c_str(), ipStr.c_str());
 }
 
+// WiFi mode, switchable from the web UI / BLE ("wifi ap" / "wifi sta") and
+// saved in flash ("apMode"); WIFI_AP_ONLY in config.h is only the default.
+// true = host the access point, false = join the home network (falls back
+// to the access point if neither network is reachable). A change is applied
+// by restarting, scheduled via wifiRestartAtMs so the reply gets sent first.
+bool wifiApMode = WIFI_AP_ONLY;
+unsigned long wifiRestartAtMs = 0;
+
 void setupWifi() {
-#if WIFI_AP_ONLY
-    startAccessPoint();
-    return;
-#endif
+    if (!wifiEnabled) {
+        WiFi.mode(WIFI_OFF);
+        wifiLabel = "WiFi off (BT only)";
+        ipStr = "";
+        Serial.println("WiFi is off - Bluetooth control only");
+        return;
+    }
+    if (wifiApMode) {
+        startAccessPoint();
+        return;
+    }
     WiFi.mode(WIFI_STA);
-    if (connectToWifi(WIFI_SSID_PRIMARY, WIFI_PASSWORD_PRIMARY, WIFI_CONNECT_TIMEOUT_MS)) {
-        wifiLabel = WIFI_SSID_PRIMARY;
-    } else if (connectToWifi(WIFI_SSID_BACKUP, WIFI_PASSWORD_BACKUP, WIFI_CONNECT_TIMEOUT_MS)) {
+    // Saved home network first, then the backup from secrets.h.
+    if (connectToWifi(staSsid.c_str(), staPass.c_str(), WIFI_CONNECT_TIMEOUT_MS)) {
+        wifiLabel = staSsid;
+    } else if (staSsid != WIFI_SSID_BACKUP &&
+               connectToWifi(WIFI_SSID_BACKUP, WIFI_PASSWORD_BACKUP, WIFI_CONNECT_TIMEOUT_MS)) {
         wifiLabel = WIFI_SSID_BACKUP;
     } else {
         Serial.println("Could not join either WiFi network - starting fallback access point");
@@ -601,12 +639,81 @@ void setupWifi() {
 // STA connections can drop (out of range, router reboot, etc.) in a way an
 // ESP32-hosted AP never does - check periodically and try to rejoin.
 void maintainWifi() {
-    if (wifiUsingFallbackAP) return;
+    if (!wifiEnabled || wifiUsingFallbackAP) return;
     static unsigned long lastCheckMs = 0;
     if (WiFi.status() == WL_CONNECTED || millis() - lastCheckMs < 30000) return;
     lastCheckMs = millis();
     Serial.println("WiFi disconnected, reconnecting...");
     WiFi.reconnect();
+}
+
+// WiFi changes are applied by restarting. Saves the current position first
+// (so the restart doesn't lose it) and schedules the restart - see loop().
+void scheduleWifiRestart(const char *tftMsg) {
+    stopGoTo();
+    prefs.begin("pantilt", false);
+    prefs.putBool("posOk", positionKnown);
+    prefs.putFloat("panPos", panPositionDeg);
+    prefs.putFloat("tiltPos", tiltPositionDeg);
+    prefs.end();
+    wifiRestartAtMs = millis() + 1500;
+    showStatusMessage(tftMsg);
+    Serial.printf("%s - restarting\n", tftMsg);
+}
+
+void requestWifiMode(bool ap) {
+    prefs.begin("pantilt", false);
+    prefs.putBool("apMode", ap);
+    prefs.end();
+    scheduleWifiRestart(ap ? "WIFI: AP" : "WIFI: HOME");
+}
+
+void requestWifiEnabled(bool on) {
+    prefs.begin("pantilt", false);
+    prefs.putBool("wifiOn", on);
+    prefs.end();
+    scheduleWifiRestart(on ? "WIFI: ON" : "WIFI: OFF");
+}
+
+// Shared by the web UI and BLE. sta = home network, else access point.
+// An empty password keeps the saved one. Returns false (msg = reason) if
+// the values are not valid.
+bool doSetWifiConfig(bool sta, String ssid, String pass, const char *&msg) {
+    ssid.trim();
+    if (ssid.length() < 1 || ssid.length() > 32) { msg = "name must be 1-32 characters"; return false; }
+    if (pass.length() > 0 && (pass.length() < 8 || pass.length() > 63)) {
+        msg = "password must be 8-63 characters"; return false;
+    }
+    prefs.begin("pantilt", false);
+    if (sta) {
+        staSsid = ssid;
+        prefs.putString("staSsid", staSsid);
+        if (pass.length() > 0) { staPass = pass; prefs.putString("staPass", staPass); }
+    } else {
+        apSsid = ssid;
+        prefs.putString("apSsid", apSsid);
+        if (pass.length() > 0) { apPass = pass; prefs.putString("apPass", apPass); }
+    }
+    prefs.end();
+    scheduleWifiRestart(sta ? "HOME WIFI SAVED" : "AP SAVED");
+    msg = "ok, restarting";
+    return true;
+}
+
+// POST form fields: kind=sta|ap, ssid, pass (empty = keep).
+void handleSetWifiConfig() {
+    String kind = server.arg("kind");
+    if (kind != "sta" && kind != "ap") { server.send(400, "text/plain", "bad kind"); return; }
+    const char *msg;
+    bool ok = doSetWifiConfig(kind == "sta", server.arg("ssid"), server.arg("pass"), msg);
+    server.send(ok ? 200 : 400, "text/plain", msg);
+}
+
+void handleSetWifiMode() {
+    String mode = server.arg("mode");
+    if (mode != "ap" && mode != "sta") { server.send(400, "text/plain", "bad mode"); return; }
+    requestWifiMode(mode == "ap");
+    server.send(200, "text/plain", "ok");
 }
 
 void handleRoot() {
@@ -947,9 +1054,9 @@ void savePresetInfoToPrefs(int idx) {
     prefs.end();
 }
 
-void handlePresetSet() {
-    uint8_t num;
-    if (!parsePresetNum(num)) { server.send(400, "text/plain", "bad preset"); return; }
+// Preset save/go and step sizes are shared by the web UI and BLE, so both
+// show and change the same values.
+void doPresetSave(uint8_t num) {
     pelco.setPreset(RS485_ADDRESS, num);
 
     int idx = (int)num - PELCO_USER_PRESET_BASE;
@@ -966,12 +1073,9 @@ void handlePresetSet() {
         }
         savePresetInfoToPrefs(idx);
     }
-    server.send(200, "text/plain", "ok");
 }
 
-void handlePresetGo() {
-    uint8_t num;
-    if (!parsePresetNum(num)) { server.send(400, "text/plain", "bad preset"); return; }
+void doPresetGo(uint8_t num) {
     stopGoTo();
     pelco.callPreset(RS485_ADDRESS, num);
     if (num == PELCO_HOME_PRESET) {
@@ -981,7 +1085,32 @@ void handlePresetGo() {
         // mark position unknown rather than show a stale/wrong estimate.
         positionKnown = false;
     }
+}
+
+void handlePresetSet() {
+    uint8_t num;
+    if (!parsePresetNum(num)) { server.send(400, "text/plain", "bad preset"); return; }
+    doPresetSave(num);
     server.send(200, "text/plain", "ok");
+}
+
+void handlePresetGo() {
+    uint8_t num;
+    if (!parsePresetNum(num)) { server.send(400, "text/plain", "bad preset"); return; }
+    doPresetGo(num);
+    server.send(200, "text/plain", "ok");
+}
+
+// Returns false if a value is out of range (0.1-20 deg).
+bool doSetSteps(float newPanStep, float newTiltStep) {
+    if (newPanStep < 0.1f || newPanStep > 20.0f || newTiltStep < 0.1f || newTiltStep > 20.0f) return false;
+    panStepDeg = newPanStep;
+    tiltStepDeg = newTiltStep;
+    prefs.begin("pantilt", false);
+    prefs.putFloat("panStep", panStepDeg);
+    prefs.putFloat("tiltStep", tiltStepDeg);
+    prefs.end();
+    return true;
 }
 
 // Only relevant if another controller (e.g. a joystick) shares this RS485
@@ -1002,19 +1131,10 @@ void handleSetSpeed() {
 }
 
 void handleSetSteps() {
-    float newPanStep = server.arg("pan").toFloat();
-    float newTiltStep = server.arg("tilt").toFloat();
-    if (newPanStep < 0.1f || newPanStep > 20.0f ||
-        newTiltStep < 0.1f || newTiltStep > 20.0f) {
+    if (!doSetSteps(server.arg("pan").toFloat(), server.arg("tilt").toFloat())) {
         server.send(400, "text/plain", "bad step");
         return;
     }
-    panStepDeg = newPanStep;
-    tiltStepDeg = newTiltStep;
-    prefs.begin("pantilt", false);
-    prefs.putFloat("panStep", panStepDeg);
-    prefs.putFloat("tiltStep", tiltStepDeg);
-    prefs.end();
     server.send(200, "text/plain", "ok");
 }
 
@@ -1022,7 +1142,7 @@ void handleStatus() {
     bool azOk = azimuthAvailable();
     float heading = azOk ? currentAzimuth() : 0.0f;
 
-    char buf[900];
+    char buf[1200];
     int n = snprintf(buf, sizeof(buf),
         "{\"heading\":%.1f,\"compassOk\":%s,\"homeSet\":%s,"
         "\"pan\":%.1f,\"tilt\":%.1f,\"posKnown\":%s,\"autoDrive\":%s,"
@@ -1032,6 +1152,7 @@ void handleStatus() {
         "\"panStep\":%.1f,\"tiltStep\":%.1f,"
         "\"panMin\":%.1f,\"panMax\":%.1f,\"tiltMin\":%.1f,\"tiltMax\":%.1f,"
         "\"goToPan\":%s,\"goToTilt\":%s,"
+        "\"apMode\":%s,\"wifiFallback\":%s,\"staSsid\":\"%s\",\"apSsid\":\"%s\","
         "\"presets\":[",
         heading, azOk ? "true" : "false", homeAzimuthSet ? "true" : "false",
         panPositionDeg, tiltPositionDeg, positionKnown ? "true" : "false",
@@ -1042,7 +1163,10 @@ void handleStatus() {
         panStepDeg, tiltStepDeg,
         PAN_LIMIT_MIN_DEG, PAN_LIMIT_MAX_DEG, TILT_LIMIT_MIN_DEG, TILT_LIMIT_MAX_DEG,
         (goToAxis == GO_PAN && goSource == GO_SRC_PAN_MID) ? "true" : "false",
-        (goToAxis == GO_TILT && goSource == GO_SRC_TILT_ZERO) ? "true" : "false");
+        (goToAxis == GO_TILT && goSource == GO_SRC_TILT_ZERO) ? "true" : "false",
+        wifiApMode ? "true" : "false",
+        (!wifiApMode && wifiUsingFallbackAP) ? "true" : "false",
+        jsonEscape(staSsid).c_str(), jsonEscape(apSsid).c_str());
     if (n < 0) n = 0;
     if (n >= (int)sizeof(buf)) n = sizeof(buf) - 1;
 
@@ -1068,14 +1192,18 @@ void handleStatus() {
 //
 // Commands (one per write): "step pan 1" / "step tilt -1" (dir: +1 = right/
 // up), "stop", "home", "savehome", "clearhome", "goaz <deg>", "panmid",
-// "tiltzero", "speed <1-63>". The reply text is reported as "res" in the
-// status.
+// "tiltzero", "speed <1-63>", "steps <pan> <tilt>", "preset go|save <1-3>",
+// "wifi ap|sta" (mode), "wifi on|off", and
+// "wificfg sta|ap\n<ssid>\n<password>" (password empty = keep). The reply
+// text is reported as "res" in the status (never the wificfg text, which
+// holds the password). setMTU(247) lets the longer wificfg command fit in
+// one write.
 //
 // BLE callbacks run on the BLE task, not loop() - so onWrite only queues the
 // command, and loop() runs it (pelco/RS485 and all state stay single-threaded).
 BLECharacteristic *bleStatusChar = nullptr;
 portMUX_TYPE bleMux = portMUX_INITIALIZER_UNLOCKED;
-char blePendingCmd[48] = "";
+char blePendingCmd[128] = "";
 bool bleCmdPending = false;
 bool bleConnected = false;
 String bleLastResult = "";
@@ -1102,6 +1230,7 @@ class BleServerCallbacks : public BLEServerCallbacks {
 void setupBle() {
     BLEDevice::init(BLE_DEVICE_NAME);
     BLEDevice::setPower(BLE_TX_POWER);
+    BLEDevice::setMTU(247);
     BLEServer *srv = BLEDevice::createServer();
     srv->setCallbacks(new BleServerCallbacks());
     BLEService *svc = srv->createService(BLE_SERVICE_UUID);
@@ -1118,7 +1247,27 @@ void setupBle() {
     Serial.printf("BLE advertising as \"%s\"\n", BLE_DEVICE_NAME);
 }
 
+// "wificfg sta|ap\n<ssid>\n<password>" - handled apart from the other
+// commands: names may contain spaces, and the text must not be logged or
+// echoed since it holds the password.
+void handleBleWifiConfig(const char *cmdText) {
+    String text = cmdText;
+    int nl1 = text.indexOf('\n');
+    int nl2 = nl1 < 0 ? -1 : text.indexOf('\n', nl1 + 1);
+    String kind = nl1 < 0 ? "" : text.substring(8, nl1);
+    kind.trim();
+    if (nl2 < 0 || (kind != "sta" && kind != "ap")) {
+        bleLastResult = "wifi settings: bad format";
+        return;
+    }
+    const char *msg;
+    doSetWifiConfig(kind == "sta", text.substring(nl1 + 1, nl2), text.substring(nl2 + 1), msg);
+    Serial.printf("BLE wifi settings (%s): %s\n", kind.c_str(), msg);
+    bleLastResult = String(kind == "sta" ? "home wifi" : "access point") + ": " + msg;
+}
+
 void handleBleCommand(const char *cmdText) {
+    if (!strncmp(cmdText, "wificfg ", 8)) { handleBleWifiConfig(cmdText); return; }
     char cmd[16] = "";
     char arg1[16] = "";
     float num = 0;
@@ -1145,6 +1294,18 @@ void handleBleCommand(const char *cmdText) {
         startGoTo(true, PAN_MID_TARGET_DEG, GO_SRC_PAN_MID);
     } else if (!strcmp(cmd, "tiltzero")) {
         startGoTo(false, TILT_ZERO_TARGET_DEG, GO_SRC_TILT_ZERO);
+    } else if (!strcmp(cmd, "wifi") && parsed >= 2 && (!strcmp(arg1, "ap") || !strcmp(arg1, "sta"))) {
+        requestWifiMode(!strcmp(arg1, "ap"));
+        res = "ok, restarting";
+    } else if (!strcmp(cmd, "wifi") && parsed >= 2 && (!strcmp(arg1, "on") || !strcmp(arg1, "off"))) {
+        requestWifiEnabled(!strcmp(arg1, "on"));
+        res = "ok, restarting";
+    } else if (!strcmp(cmd, "preset") && parsed == 3 && (!strcmp(arg1, "go") || !strcmp(arg1, "save")) &&
+               num >= 1 && num <= PELCO_USER_PRESET_COUNT) {
+        uint8_t presetNum = PELCO_USER_PRESET_BASE + (int)num - 1; // slot 1..3 -> head preset number
+        if (!strcmp(arg1, "go")) doPresetGo(presetNum); else doPresetSave(presetNum);
+    } else if (!strcmp(cmd, "steps") && parsed == 3) {
+        if (!doSetSteps(atof(arg1), num)) res = "step must be 0.1-20";
     } else if (!strcmp(cmd, "speed") && parsed >= 2 && atoi(arg1) >= 1 && atoi(arg1) <= 63) {
         jogSpeed = (uint8_t)atoi(arg1);
         prefs.begin("pantilt", false);
@@ -1175,13 +1336,31 @@ void updateBle() {
     if (!bleConnected || millis() - lastStatusMs < 250) return;
     lastStatusMs = millis();
     bool azOk = azimuthAvailable();
-    char buf[200];
+    // Presets as [azOk, az, tiltOk, tilt] per slot - same values the web UI shows.
+    String presets = "[";
+    for (int i = 0; i < PELCO_USER_PRESET_COUNT; i++) {
+        char p[48];
+        snprintf(p, sizeof(p), "%s[%d,%.1f,%d,%.1f]", i ? "," : "",
+                 presetAzKnown[i], presetAz[i], presetTiltKnown[i], presetTilt[i]);
+        presets += p;
+    }
+    presets += "]";
+    // Keep the reply text short so the status stays under the 512-byte BLE limit.
+    String res = bleLastResult.length() > 60 ? bleLastResult.substring(0, 60) : bleLastResult;
+
+    char buf[512]; // max BLE attribute size; read with long reads, so the MTU doesn't limit it
     snprintf(buf, sizeof(buf),
         "{\"az\":%.1f,\"azOk\":%d,\"home\":%d,\"pan\":%.1f,\"tilt\":%.1f,\"pk\":%d,"
-        "\"rp\":%.1f,\"rt\":%.1f,\"drv\":%d,\"spd\":%u,\"res\":\"%s\"}",
+        "\"rp\":%.1f,\"rt\":%.1f,\"drv\":%d,\"spd\":%u,\"ps\":%.1f,\"ts\":%.1f,"
+        "\"lim\":[%.0f,%.0f,%.0f,%.0f],\"pr\":%s,"
+        "\"ap\":%d,\"wifi\":%d,\"fb\":%d,"
+        "\"staSsid\":\"%s\",\"apSsid\":\"%s\",\"res\":\"%s\"}",
         azOk ? currentAzimuth() : 0.0f, azOk, homeAzimuthSet, panPositionDeg, tiltPositionDeg,
         positionKnown, rawPanDeg, rawTiltDeg - TILT_ZERO_TARGET_DEG, goToAxis != GO_NONE, jogSpeed,
-        bleLastResult.c_str());
+        panStepDeg, tiltStepDeg,
+        PAN_LIMIT_MIN_DEG, PAN_LIMIT_MAX_DEG, TILT_LIMIT_MIN_DEG, TILT_LIMIT_MAX_DEG, presets.c_str(),
+        wifiApMode, wifiEnabled, wifiEnabled && !wifiApMode && wifiUsingFallbackAP,
+        jsonEscape(staSsid).c_str(), jsonEscape(apSsid).c_str(), jsonEscape(res).c_str());
     bleStatusChar->setValue(buf);
 }
 
@@ -1201,7 +1380,7 @@ void drawStaticScreen() {
     tft.setTextColor(ST77XX_WHITE);
     tft.setTextSize(1);
     tft.setCursor(4, 4);
-    tft.println(wifiLabel + ":");
+    tft.println(ipStr.length() ? wifiLabel + ":" : wifiLabel);
     tft.setCursor(4, 14);
     tft.println(ipStr);
     tft.drawFastHLine(0, 26, tft.width(), ST77XX_CYAN);
@@ -1340,6 +1519,12 @@ void setup() {
     homeAzimuthSet = prefs.isKey("homeAz");
     homeAzimuth = prefs.getFloat("homeAz", 0.0f);
     jogSpeed = prefs.getUChar("speed", PELCO_STEP_SPEED);
+    wifiApMode = prefs.getBool("apMode", WIFI_AP_ONLY);
+    wifiEnabled = prefs.getBool("wifiOn", true);
+    staSsid = prefs.getString("staSsid", WIFI_SSID_PRIMARY);
+    staPass = prefs.getString("staPass", WIFI_PASSWORD_PRIMARY);
+    apSsid = prefs.getString("apSsid", AP_SSID);
+    apPass = prefs.getString("apPass", AP_PASSWORD);
     panStepDeg = prefs.getFloat("panStep", DEFAULT_PAN_STEP_DEG);
     tiltStepDeg = prefs.getFloat("tiltStep", DEFAULT_TILT_STEP_DEG);
     for (int i = 0; i < PELCO_USER_PRESET_COUNT; i++) {
@@ -1383,6 +1568,8 @@ void setup() {
     server.on("/setSpeed", handleSetSpeed);
         server.on("/setSteps", handleSetSteps);
     server.on("/status", handleStatus);
+    server.on("/setWifiMode", handleSetWifiMode);
+    server.on("/setWifiConfig", HTTP_POST, handleSetWifiConfig);
     server.begin();
 }
 
@@ -1395,6 +1582,7 @@ void loop() {
     refreshRawPosition();
     savePositionWhenSettled();
     updateBle();
+    if (wifiRestartAtMs && (long)(millis() - wifiRestartAtMs) >= 0) ESP.restart();
 
     PelcoCommand pelcoCmd;
     if (pelco.poll(pelcoCmd)) {

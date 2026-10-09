@@ -1,0 +1,612 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#111111"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_horizontal"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <!-- Header: back (Settings screen only), title, settings button -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnBack"
+                android:layout_width="52dp"
+                android:layout_height="52dp"
+                android:backgroundTint="#333333"
+                android:text="&#8592;"
+                android:textColor="#FFFFFF"
+                android:textSize="22sp"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/titleText"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center"
+                android:text="Pan / Tilt Camera"
+                android:textColor="#EEEEEE"
+                android:textSize="22sp"
+                android:textStyle="bold" />
+
+            <Button
+                android:id="@+id/btnSettings"
+                android:layout_width="52dp"
+                android:layout_height="52dp"
+                android:backgroundTint="#333333"
+                android:text="&#9881;"
+                android:textColor="#FFFFFF"
+                android:textSize="22sp" />
+        </LinearLayout>
+
+        <!-- Connection -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/connText"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Not connected"
+                android:textColor="#99AABB"
+                android:textSize="14sp" />
+
+            <Button
+                android:id="@+id/btnConnect"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:backgroundTint="#6B2FA0"
+                android:text="Connect"
+                android:textColor="#FFFFFF" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/controls"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_horizontal"
+            android:orientation="vertical">
+
+            <!-- Status -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/panel"
+                android:gravity="center_horizontal"
+                android:orientation="vertical"
+                android:padding="12dp">
+
+                <TextView
+                    android:id="@+id/azText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Azimut: --"
+                    android:textColor="#FFFFFF"
+                    android:textSize="24sp" />
+
+                <TextView
+                    android:id="@+id/panText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Pan: --"
+                    android:textColor="#FFEB3B"
+                    android:textSize="20sp" />
+
+                <TextView
+                    android:id="@+id/rawPanText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Motor Pan: --"
+                    android:textColor="#CCCCCC"
+                    android:textSize="16sp" />
+
+                <TextView
+                    android:id="@+id/tiltText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Tilt: --"
+                    android:textColor="#FFEB3B"
+                    android:textSize="20sp" />
+            </LinearLayout>
+
+            <!-- Direction pad: tap = one step, hold = repeat -->
+            <GridLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:columnCount="3"
+                android:rowCount="3">
+
+                <Button
+                    android:id="@+id/btnUp"
+                    android:layout_width="88dp"
+                    android:layout_height="80dp"
+                    android:layout_row="0"
+                    android:layout_column="1"
+                    android:layout_margin="4dp"
+                    android:backgroundTint="#C0392B"
+                    android:text="&#9650;"
+                    android:textColor="#FFFFFF"
+                    android:textSize="26sp" />
+
+                <Button
+                    android:id="@+id/btnLeft"
+                    android:layout_width="88dp"
+                    android:layout_height="80dp"
+                    android:layout_row="1"
+                    android:layout_column="0"
+                    android:layout_margin="4dp"
+                    android:backgroundTint="#C0392B"
+                    android:text="&#9664;"
+                    android:textColor="#FFFFFF"
+                    android:textSize="26sp" />
+
+                <Button
+                    android:id="@+id/btnStop"
+                    android:layout_width="88dp"
+                    android:layout_height="80dp"
+                    android:layout_row="1"
+                    android:layout_column="1"
+                    android:layout_margin="4dp"
+                    android:backgroundTint="#555555"
+                    android:text="STOP"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp" />
+
+                <Button
+                    android:id="@+id/btnRight"
+                    android:layout_width="88dp"
+                    android:layout_height="80dp"
+                    android:layout_row="1"
+                    android:layout_column="2"
+                    android:layout_margin="4dp"
+                    android:backgroundTint="#C0392B"
+                    android:text="&#9654;"
+                    android:textColor="#FFFFFF"
+                    android:textSize="26sp" />
+
+                <Button
+                    android:id="@+id/btnDown"
+                    android:layout_width="88dp"
+                    android:layout_height="80dp"
+                    android:layout_row="2"
+                    android:layout_column="1"
+                    android:layout_margin="4dp"
+                    android:backgroundTint="#C0392B"
+                    android:text="&#9660;"
+                    android:textColor="#FFFFFF"
+                    android:textSize="26sp" />
+            </GridLayout>
+
+            <!-- Home -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnHome"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:backgroundTint="#D94F2B"
+                    android:text="HOME"
+                    android:textColor="#FFFFFF" />
+
+                <Button
+                    android:id="@+id/btnSaveHome"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:backgroundTint="#2B9E4F"
+                    android:text="Save Home"
+                    android:textColor="#FFFFFF" />
+
+                <Button
+                    android:id="@+id/btnClearHome"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:backgroundTint="#C0392B"
+                    android:text="Clear Home"
+                    android:textColor="#FFFFFF" />
+            </LinearLayout>
+
+            <!-- Go to Azimut -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <EditText
+                    android:id="@+id/azInput"
+                    android:layout_width="110dp"
+                    android:layout_height="wrap_content"
+                    android:backgroundTint="#2D6CDF"
+                    android:gravity="center"
+                    android:hint="0-359"
+                    android:imeOptions="actionGo"
+                    android:inputType="numberDecimal"
+                    android:maxLength="5"
+                    android:textColor="#FFFFFF"
+                    android:textColorHint="#777777"
+                    android:textSize="20sp" />
+
+                <Button
+                    android:id="@+id/btnGoAz"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:backgroundTint="#2D6CDF"
+                    android:text="Go to Azimut"
+                    android:textColor="#FFFFFF" />
+            </LinearLayout>
+
+            <!-- Position targets -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnPanMid"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:backgroundTint="#2D6CDF"
+                    android:text="Pan Mid (175°)"
+                    android:textColor="#FFFFFF" />
+
+                <Button
+                    android:id="@+id/btnTiltZero"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:backgroundTint="#2D6CDF"
+                    android:text="Tilt Zero (29°)"
+                    android:textColor="#FFFFFF" />
+            </LinearLayout>
+
+            <!-- Position presets (rows added in code, same slots as the web page) -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/panel"
+                android:orientation="vertical"
+                android:padding="12dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="POSITION PRESETS"
+                    android:textColor="#99AABB"
+                    android:textSize="13sp" />
+
+                <LinearLayout
+                    android:id="@+id/presetRows"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical" />
+            </LinearLayout>
+            <TextView
+                android:id="@+id/resText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:textColor="#99AABB"
+                android:textSize="13sp" />
+        </LinearLayout>
+
+        <!-- Settings screen (hidden until the settings button is pressed) -->
+        <LinearLayout
+            android:id="@+id/settingsScreen"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_horizontal"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <!-- Jog speed -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/panel"
+                android:orientation="vertical"
+                android:padding="12dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="JOG SPEED"
+                    android:textColor="#99AABB"
+                    android:textSize="13sp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <SeekBar
+                        android:id="@+id/speedBar"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:max="63"
+                        android:min="1"
+                        android:progress="63" />
+
+                    <TextView
+                        android:id="@+id/speedVal"
+                        android:layout_width="36dp"
+                        android:layout_height="wrap_content"
+                        android:gravity="end"
+                        android:text="63"
+                        android:textColor="#FFFFFF"
+                        android:textSize="16sp" />
+                </LinearLayout>
+            </LinearLayout>
+
+
+            <!-- Step sizes and limits -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/panel"
+                android:orientation="vertical"
+                android:padding="12dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="STEP SIZE (one press)"
+                    android:textColor="#99AABB"
+                    android:textSize="13sp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Pan step (deg)"
+                        android:textColor="#EEEEEE" />
+
+                    <EditText
+                        android:id="@+id/panStepInput"
+                        android:layout_width="90dp"
+                        android:layout_height="wrap_content"
+                        android:backgroundTint="#2D6CDF"
+                        android:gravity="end"
+                        android:inputType="numberDecimal"
+                        android:maxLength="5"
+                        android:textColor="#FFFFFF" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Tilt step (deg)"
+                        android:textColor="#EEEEEE" />
+
+                    <EditText
+                        android:id="@+id/tiltStepInput"
+                        android:layout_width="90dp"
+                        android:layout_height="wrap_content"
+                        android:backgroundTint="#2D6CDF"
+                        android:gravity="end"
+                        android:inputType="numberDecimal"
+                        android:maxLength="5"
+                        android:textColor="#FFFFFF" />
+                </LinearLayout>
+
+                <Button
+                    android:id="@+id/btnSaveSteps"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:backgroundTint="#2D6CDF"
+                    android:text="Save step sizes"
+                    android:textColor="#FFFFFF" />
+
+                <TextView
+                    android:id="@+id/limitsText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="Pan limits: --\nTilt limits: --"
+                    android:textColor="#99AABB"
+                    android:textSize="13sp" />
+            </LinearLayout>
+            <!-- WiFi mode -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/panel"
+                android:gravity="center_horizontal"
+                android:orientation="vertical"
+                android:padding="12dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="WIFI"
+                    android:textColor="#99AABB"
+                    android:textSize="13sp" />
+
+                <!-- WiFi on/off (off = Bluetooth control only) -->
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="8dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Off"
+                        android:textColor="#EEEEEE" />
+
+                    <Switch
+                        android:id="@+id/wifiOnSwitch"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="12dp"
+                        android:layout_marginEnd="12dp" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="On"
+                        android:textColor="#EEEEEE" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Access point"
+                        android:textColor="#EEEEEE" />
+
+                    <Switch
+                        android:id="@+id/wifiSwitch"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="12dp"
+                        android:layout_marginEnd="12dp" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Home WiFi"
+                        android:textColor="#EEEEEE" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/wifiNote"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textColor="#99AABB"
+                    android:textSize="12sp" />
+
+                <!-- WiFi settings (empty password = keep the saved one) -->
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="Home WiFi network"
+                    android:textColor="#99AABB"
+                    android:textSize="13sp" />
+
+                <EditText
+                    android:id="@+id/staSsid"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:backgroundTint="#2D6CDF"
+                    android:hint="Network name (SSID)"
+                    android:inputType="text"
+                    android:maxLength="32"
+                    android:textColor="#FFFFFF"
+                    android:textColorHint="#777777" />
+
+                <EditText
+                    android:id="@+id/staPass"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:backgroundTint="#2D6CDF"
+                    android:hint="Password (empty = keep current)"
+                    android:inputType="textPassword"
+                    android:maxLength="63"
+                    android:textColor="#FFFFFF"
+                    android:textColorHint="#777777" />
+
+                <Button
+                    android:id="@+id/btnSaveSta"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:backgroundTint="#2D6CDF"
+                    android:text="Save home WiFi"
+                    android:textColor="#FFFFFF" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="Access point"
+                    android:textColor="#99AABB"
+                    android:textSize="13sp" />
+
+                <EditText
+                    android:id="@+id/apSsid"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:backgroundTint="#2D6CDF"
+                    android:hint="Access point name"
+                    android:inputType="text"
+                    android:maxLength="32"
+                    android:textColor="#FFFFFF"
+                    android:textColorHint="#777777" />
+
+                <EditText
+                    android:id="@+id/apPass"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:backgroundTint="#2D6CDF"
+                    android:hint="Password, 8+ chars (empty = keep current)"
+                    android:inputType="textPassword"
+                    android:maxLength="63"
+                    android:textColor="#FFFFFF"
+                    android:textColorHint="#777777" />
+
+                <Button
+                    android:id="@+id/btnSaveAp"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:backgroundTint="#2D6CDF"
+                    android:text="Save access point"
+                    android:textColor="#FFFFFF" />
+            </LinearLayout>
+        </LinearLayout>
+    </LinearLayout>
+</ScrollView>

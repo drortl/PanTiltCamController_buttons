@@ -42,6 +42,9 @@
 // ============================================================================
 
 // ---------- WiFi ----------
+// The mode is switchable at runtime from the web UI (WIFI MODE switch) or
+// BLE ("wifi ap" / "wifi sta") and saved in flash; WIFI_AP_ONLY below is
+// only the default used before it was ever switched.
 // WIFI_AP_ONLY 1: the device always hosts its own access point
 // (AP_SSID/AP_PASSWORD), web UI at http://192.168.4.1 - no router needed.
 // WIFI_AP_ONLY 0: tries the primary network first, then the backup, at
